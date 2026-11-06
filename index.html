@@ -929,7 +929,7 @@ function fmtNum(n) { n = Math.round(n); if (n >= 1e6) return (n / 1e6).toFixed(1
 function vib(p) { if (!SAVE.set.vib) return; try { if (navigator.vibrate) navigator.vibrate(p); } catch (e) { /* ignore */ } }
 
 /* ================= save ================= */
-const GAME_VER = '2.6.1';
+const GAME_VER = '2.6.2';
 const SAVE_KEY = 'iskra.save.v1';
 const APP = typeof window.IskraApp !== 'undefined'; // running inside the Android app
 const FRZ = { st: '', dirty: false }; // frozen-world redraw state (see frame())
@@ -6235,12 +6235,13 @@ function drawParticles() {
 }
 function drawFx() {
   ctx.globalCompositeOperation = 'lighter';
+  let halos = [5, 10, 22][QUAL.lvl]; // big soft glows cost the GPU the most: only a few at a time on weak settings
   for (const f of G.fx) {
     if (f.t < 0) continue;
     const k = clamp(f.t / f.dur, 0, 1);
     if (f.k === 'boom') {
       const X = sxw(f.x), Y = syw(f.y), R = f.r * Z * (0.3 + 0.7 * easeOut(k));
-      haloAt(f.ci, X, Y, R * 1.2, (1 - k) * 0.8);
+      if (halos-- > 0) haloAt(f.ci, X, Y, R * 1.2, (1 - k) * 0.8);
       ctx.globalAlpha = 1 - k; ctx.strokeStyle = PAL[f.ci]; ctx.lineWidth = (7 * (1 - k) + 1) * Z;
       ctx.beginPath(); ctx.arc(X, Y, R, 0, TAU); ctx.stroke();
       if (k < 0.25) glowAt(CI_WHITE, X, Y, R * 0.6, (0.25 - k) * 3);
@@ -7664,6 +7665,7 @@ function renderSettings() {
   tog('Тряска экрана', 'shake');
   tog('Кнопки рывка и вспышки слева', 'lefty', applyLefty);
   tog('Экономия батареи (30 FPS)', 'cap');
+  tog('120 FPS (если экран умеет, греет телефон)', 'hz');
   tog('Счётчик FPS', 'fps');
   tog('Заставка при запуске', 'intro');
   if (APP) {
@@ -9323,7 +9325,7 @@ function initUI25() {
 
 /* ================= main loop ================= */
 let lastNow = 0;
-const PERF = { acc: 0, n: 0, minDt: 1, cool: 3, good: 0, noUp: false };
+const PERF = { acc: 0, n: 0, minDt: 1, cool: 3, good: 0, noUp: false, rate: 1 / 60, raw: 0 };
 function autoQuality(dt) {
   if (dt < PERF.minDt) PERF.minDt = dt;
   if (!QUAL.auto || STATE !== 'play') { PERF.acc = 0; PERF.n = 0; return; }
@@ -9331,8 +9333,8 @@ function autoQuality(dt) {
   if (PERF.n >= 90) {
     const avg = PERF.acc / PERF.n; PERF.acc = 0; PERF.n = 0; PERF.cool--;
     if (PERF.cool > 0) return;
-    if (QUAL.lvl > 0 && avg > Math.max(PERF.minDt * 1.5, 1 / 48)) { QUAL.lvl--; applyQuality(); PERF.cool = 3; PERF.noUp = true; PERF.good = 0; }
-    else if (!PERF.noUp && QUAL.lvl < 2 && avg < Math.max(PERF.minDt * 1.12, 1 / 57)) { if (++PERF.good >= 4) { QUAL.lvl++; applyQuality(); PERF.cool = 3; PERF.good = 0; } }
+    if (QUAL.lvl > 0 && avg > Math.max(PERF.minDt * 1.25, 1 / 52)) { QUAL.lvl--; applyQuality(); PERF.cool = 3; PERF.noUp = true; PERF.good = 0; }
+    else if (!PERF.noUp && QUAL.lvl < 2 && avg < Math.max(PERF.minDt * 1.08, 1 / 58)) { if (++PERF.good >= 4) { QUAL.lvl++; applyQuality(); PERF.cool = 3; PERF.good = 0; } }
     else PERF.good = 0;
   }
 }
@@ -9379,7 +9381,12 @@ function afterUpdate() {
 function frame(now) {
   requestAnimationFrame(frame);
   if (window.__simLock) { lastNow = now; return; }
+  // how often the screen refreshes (120/144 Hz phones call us twice as often as 60 Hz ones)
+  if (PERF.raw) { const r = now - PERF.raw; if (r > 2 && r < 50) PERF.rate += (r / 1000 - PERF.rate) * 0.05; }
+  PERF.raw = now;
   if (SAVE.set.cap && lastNow && now - lastNow < 30) return; // battery saver: ~30 FPS
+  // on fast screens hold an even 60 FPS (half the work, no judder) unless the player wants more
+  if (!SAVE.set.hz && PERF.rate < 0.0105 && lastNow && now - lastNow < 12.5) return;
   fpsTick(now);
   if (!lastNow) lastNow = now;
   let dt = (now - lastNow) / 1000; lastNow = now;
