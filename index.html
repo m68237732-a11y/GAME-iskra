@@ -929,7 +929,7 @@ function fmtNum(n) { n = Math.round(n); if (n >= 1e6) return (n / 1e6).toFixed(1
 function vib(p) { if (!SAVE.set.vib) return; try { if (navigator.vibrate) navigator.vibrate(p); } catch (e) { /* ignore */ } }
 
 /* ================= save ================= */
-const GAME_VER = '2.5.2';
+const GAME_VER = '2.6';
 const SAVE_KEY = 'iskra.save.v1';
 const APP = typeof window.IskraApp !== 'undefined'; // running inside the Android app
 const FRZ = { st: '', dirty: false }; // frozen-world redraw state (see frame())
@@ -1530,13 +1530,25 @@ const TRACKS_UI = [
   { id: 'arena', name: 'Арена', style: 'хард-дэнс' },
   { id: 'chip', name: '8-бит', style: 'чиптюн' },
   { id: 'ambient', name: 'Глубина', style: 'эмбиент' },
+  { id: 'nebula', name: 'Туманность', style: 'чилвейв' },
+  { id: 'hyper', name: 'Гиперпрыжок', style: 'транс' },
+  { id: 'dark', name: 'Тьма', style: 'дарксинт' },
+  { id: 'frost', name: 'Лёд', style: 'гэридж' },
+  { id: 'inferno', name: 'Инферно', style: 'индастриал' },
+  { id: 'epic', name: 'Финал', style: 'эпик' },
 ];
-const RUN_TRACKS = ['spark', 'phonk', 'acid', 'arena', 'chip'];
+const RUN_TRACKS = ['spark', 'phonk', 'acid', 'arena', 'chip', 'nebula', 'hyper', 'dark', 'frost', 'inferno'];
+const CH_TRACKS = ['spark', 'nebula', 'acid', 'frost', 'inferno', 'phonk', 'chip', 'hyper', 'dark', 'epic']; // a sound for every chapter of the levels
 function musicFor(ctx) {
   const sel = SAVE.set.track;
   if (sel && sel !== 'auto' && sel !== 'custom') return sel;
   if (ctx === 'menu') return 'ambient';
-  if (ctx === 'boss') return 'dnb';
+  if (ctx === 'boss') {
+    const b = G && G.boss;
+    if ((G && G.stg && G.stg.d.big) || (b && b.bt === 'core')) return 'epic';
+    return b && (b.bt === 'colossus' || b.bt === 'specter' || b.bt === 'devourer') ? 'dark' : 'dnb';
+  }
+  if (G && G.stg) return CH_TRACKS[G.stg.d.ci % CH_TRACKS.length];
   return (G && G.runTrack) || 'spark';
 }
 
@@ -1888,6 +1900,7 @@ const MUS_MAX = 1, MUS_MAKEUP = 2.0, SFX_MAX = 1.15;
 const SFX = (() => {
   let ac = null, sfxBus = null, musBus = null, musTrim = null, musMake = null, musLvl = null, outNode = null, noiseBuf = null, driveCurve = null;
   const lastT = {};
+  let RB = null, duckG = null, delayNodes = null;
   let want = false, musicOn = false, step = 0, nextT = 0, timer = null, intensity = 0, boss = false, musVol = 1, track = 'ambient';
 
   function init() {
@@ -1907,6 +1920,31 @@ const SFX = (() => {
       lim.threshold.value = -3; lim.knee.value = 0; lim.ratio.value = 20; lim.attack.value = 0.001; lim.release.value = 0.12;
       sfxBus = ac.createGain(); musBus = ac.createGain(); musTrim = ac.createGain(); musTrim.connect(musBus); musTrim.gain.value = (TR[track] && TR[track].vol) || 1;
       musMake = ac.createGain(); musMake.gain.value = MUS_MAKEUP;
+      // headphone-friendly space: every music voice goes to a role bus with its own reverb / ping-pong delay sends;
+      // pads, bass and arps sit behind a gain the kick pumps (the classic sidechain feel)
+      try {
+        const Gn = (v) => { const g = ac.createGain(); g.gain.value = v === undefined ? 1 : v; return g; };
+        duckG = Gn(); duckG.connect(musTrim);
+        const revIn = Gn(), hp = ac.createBiquadFilter(), rev = ac.createConvolver(), revOut = Gn(0.9);
+        revIn.channelCount = 1; revIn.channelCountMode = 'explicit';
+        hp.type = 'highpass'; hp.frequency.value = 220;
+        rev.buffer = makeIR(2.4);
+        revIn.connect(hp); hp.connect(rev); rev.connect(revOut); revOut.connect(musTrim);
+        const delIn = Gn(), dlp = ac.createBiquadFilter(), dL = ac.createDelay(2), dR = ac.createDelay(2), fbL = Gn(0.36), fbR = Gn(0.36), mer = ac.createChannelMerger(2), delOut = Gn(0.7), dRev = Gn(0.25);
+        delIn.channelCount = 1; delIn.channelCountMode = 'explicit';
+        dlp.type = 'lowpass'; dlp.frequency.value = 3800;
+        dL.delayTime.value = dR.delayTime.value = 0.38;
+        delIn.connect(dlp); dlp.connect(dL); dL.connect(mer, 0, 0); dL.connect(fbL); fbL.connect(dR); dR.connect(mer, 0, 1); dR.connect(fbR); fbR.connect(dL);
+        mer.connect(delOut); delOut.connect(musTrim); delOut.connect(dRev); dRev.connect(revIn);
+        delayNodes = [dL, dR];
+        RB = {};
+        for (const [k, dk, rv, dl] of [['kick', 0, 0.03, 0], ['drum', 0, 0.1, 0], ['snare', 0, 0.3, 0], ['bass', 1, 0, 0], ['pad', 1, 0.55, 0], ['arp', 1, 0.2, 0.3], ['lead', 0, 0.25, 0.28], ['bell', 0, 0.6, 0.22], ['fx', 0, 0.5, 0]]) {
+          const bus = Gn(); bus.connect(dk ? duckG : musTrim);
+          if (rv) { const sn = Gn(rv); bus.connect(sn); sn.connect(revIn); }
+          if (dl) { const sn = Gn(dl); bus.connect(sn); sn.connect(delIn); }
+          RB[k] = bus;
+        }
+      } catch (e) { RB = null; duckG = null; delayNodes = null; }
       musLvl = ac.createGain(); // the slider lives after the leveller, so 50% really sounds half as loud
       musBus.connect(mcomp); mcomp.connect(musMake); musMake.connect(musLvl); musLvl.connect(comp);
       // last line of defence: a soft clipper rounds off anything the limiter lets through
@@ -1932,6 +1970,16 @@ const SFX = (() => {
     musLvl.gain.value = SAVE.set.music ? MUS_MAX * mv * mv * musVol : 0;
     MYMUS.volUpdate();
   }
+  // a synthetic hall: decaying stereo noise that darkens as it fades, plus a few early reflections
+  function makeIR(sec) {
+    const sr = ac.sampleRate, n = Math.floor(sr * sec), b = ac.createBuffer(2, n, sr);
+    for (let c = 0; c < 2; c++) {
+      const d = b.getChannelData(c); let lp = 0;
+      for (let i = 0; i < n; i++) { const x = i / n; lp += (Math.random() * 2 - 1 - lp) * (0.7 - 0.62 * x); d[i] = lp * Math.pow(1 - x, 1.6) * Math.exp(-x * 3.2); }
+      for (const [ms, g] of [[11, 0.5], [17, 0.35], [29, 0.3], [41, 0.22], [53, 0.15]]) { const k = Math.floor(((ms + (c ? 4 : 0)) / 1000) * sr); if (k < n) d[k] += (c ? -g : g) * 0.6; }
+    }
+    return b;
+  }
   const live = () => ac && ac.state === 'running';
   function ok(key, gap) {
     const t = ac.currentTime;
@@ -1948,6 +1996,7 @@ const SFX = (() => {
     if (o.det) osc.detune.value = o.det;
     g.gain.setValueAtTime(0.0001, t);
     g.gain.exponentialRampToValueAtTime(v, t + a);
+    if (o.hold) g.gain.setValueAtTime(v, t + a + d * o.hold);
     g.gain.exponentialRampToValueAtTime(0.0001, t + a + d);
     let node = osc;
     if (o.drive) { const ws = ac.createWaveShaper(); ws.curve = driveCurve; node.connect(ws); node = ws; }
@@ -1957,7 +2006,11 @@ const SFX = (() => {
       if (o.lp2) f.frequency.exponentialRampToValueAtTime(o.lp2, t + a + d);
       f.Q.value = o.q || 0.8; node.connect(f); node = f;
     }
-    node.connect(g); g.connect(o.bus || sfxBus);
+    if (o.bp) { const f = ac.createBiquadFilter(); f.type = 'bandpass'; f.frequency.value = o.bp; f.Q.value = o.q || 4; node.connect(f); node = f; }
+    node.connect(g);
+    let out = g;
+    if (o.pan && ac.createStereoPanner) { const pn = ac.createStereoPanner(); pn.pan.value = o.pan; g.connect(pn); out = pn; }
+    out.connect(o.bus || sfxBus);
     osc.start(t); osc.stop(t + a + d + 0.05);
   }
   function noise(o) {
@@ -1972,7 +2025,10 @@ const SFX = (() => {
     g.gain.setValueAtTime(0.0001, t);
     g.gain.exponentialRampToValueAtTime(v, t + a);
     g.gain.exponentialRampToValueAtTime(0.0001, t + a + d);
-    src.connect(f); f.connect(g); g.connect(o.bus || sfxBus);
+    src.connect(f); f.connect(g);
+    let out = g;
+    if (o.pan && ac.createStereoPanner) { const pn = ac.createStereoPanner(); pn.pan.value = o.pan; g.connect(pn); out = pn; }
+    out.connect(o.bus || sfxBus);
     src.start(t, Math.random() * 0.5); src.stop(t + a + d + 0.05);
   }
   const semi = (base, n) => base * Math.pow(2, n / 12);
@@ -2110,33 +2166,68 @@ const SFX = (() => {
 
   /* ---------- music: instruments ---------- */
   const mtof = (m) => 440 * Math.pow(2, (m - 69) / 12);
-  const M = (o) => { o.bus = musTrim; tone(o); };
-  const MN = (o) => { o.bus = musTrim; noise(o); };
-  function iKick(t, v = 0.3, hard) {
-    M({ type: 'sine', f: hard ? 185 : 150, f2: 42, slide: 0.12, dur: 0.24, v, at: t, drive: !!hard });
-    if (hard) MN({ ft: 'highpass', f: 3200, dur: 0.02, v: v * 0.25, at: t });
+  // every music voice belongs to a role: the role decides its reverb/delay sends and whether the kick pumps it
+  const M = (o) => { o.bus = (RB && RB[o.role || 'lead']) || musTrim; tone(o); };
+  const MN = (o) => { o.bus = (RB && RB[o.role || 'drum']) || musTrim; noise(o); };
+  function duck(t, amt, rel) {
+    if (!duckG) return;
+    const g = duckG.gain;
+    g.setValueAtTime(1, t); g.linearRampToValueAtTime(1 - amt, t + 0.012); g.linearRampToValueAtTime(1, t + rel);
   }
-  function iSnare(t, v = 0.065) { MN({ ft: 'bandpass', f: 1900, dur: 0.13, v, at: t }); M({ type: 'triangle', f: 210, f2: 150, dur: 0.06, v: v * 0.7, at: t }); }
-  function iClap(t, v = 0.06) { for (let i = 0; i < 3; i++) MN({ ft: 'bandpass', f: 1250, q: 1.4, dur: i === 2 ? 0.11 : 0.025, v, at: t + i * 0.011 }); }
-  function iHat(t, v = 0.03, open) { MN({ ft: 'highpass', f: 8200, dur: open ? 0.13 : 0.028, v, at: t }); }
+  function iKick(t, v = 0.3, hard) {
+    M({ role: 'kick', type: 'sine', f: hard ? 185 : 160, f2: 44, slide: 0.11, dur: 0.26, v, at: t, drive: !!hard });
+    M({ role: 'kick', type: 'triangle', f: 1500, f2: 260, slide: 0.012, dur: 0.012, v: v * 0.2, at: t });
+    if (hard) MN({ role: 'kick', ft: 'highpass', f: 3200, dur: 0.02, v: v * 0.25, at: t });
+    duck(t, hard ? 0.55 : 0.45, 0.22);
+  }
+  function iSnare(t, v = 0.065) {
+    MN({ role: 'snare', ft: 'bandpass', f: 1900, q: 0.9, dur: 0.15, v, at: t });
+    MN({ role: 'snare', ft: 'highpass', f: 5200, dur: 0.06, v: v * 0.45, at: t });
+    M({ role: 'snare', type: 'triangle', f: 220, f2: 160, dur: 0.07, v: v * 0.8, at: t });
+  }
+  function iClap(t, v = 0.06) { for (let i = 0; i < 3; i++) MN({ role: 'snare', ft: 'bandpass', f: 1250, q: 1.4, dur: i === 2 ? 0.13 : 0.025, v, at: t + i * 0.011, pan: (i - 1) * 0.3 }); }
+  let hatPan = 0.22, leadPan = 0.16;
+  function iHat(t, v = 0.03, open) { hatPan = -hatPan; MN({ role: 'drum', ft: 'highpass', f: 8200, dur: open ? 0.14 : 0.028, v, at: t, pan: hatPan }); }
   function iBass(t, m, dur, o) {
     o = o || {};
-    M({ type: o.type || 'sawtooth', f: mtof(m), dur, v: o.v || 0.07, at: t, lp: o.lp || 600, lp2: o.lp2 || 160, q: o.q || 5, det: o.det, drive: o.drive, f2: o.to ? mtof(o.to) : 0, slide: o.slide });
+    M({ role: 'bass', type: o.type || 'sawtooth', f: mtof(m), dur, v: o.v || 0.07, at: t, lp: o.lp || 600, lp2: o.lp2 || 160, q: o.q || 5, det: o.det, drive: o.drive, f2: o.to ? mtof(o.to) : 0, slide: o.slide, hold: o.hold });
+    if (o.sub) M({ role: 'bass', type: 'sine', f: mtof(m - 12), dur, v: o.sub, at: t, hold: o.hold });
   }
-  function iLead(t, m, dur, o) { o = o || {}; M({ type: o.type || 'square', f: mtof(m), dur, v: o.v || 0.022, at: t, lp: o.lp || 2600, lp2: o.lp2 || 700, a: o.a, det: o.det }); }
-  function iPad(t, ch, dur, v, type, lp) { for (const m of ch) M({ type: type || 'triangle', f: mtof(m), dur, a: 0.35, v: v || 0.026, at: t, lp: lp || 1500 }); }
-  function iBell(t, m, v, dur) { M({ type: 'sine', f: mtof(m), dur: dur || 1.4, v: v || 0.03, at: t }); M({ type: 'sine', f: mtof(m) * 2.76, dur: (dur || 1.4) * 0.4, v: (v || 0.03) * 0.25, at: t }); }
-  function iCow(t, m, v) { const f = mtof(m); v = v || 0.045; M({ type: 'square', f, dur: 0.17, v, at: t, lp: 2400, lp2: 800 }); M({ type: 'square', f: f * 1.505, dur: 0.12, v: v * 0.55, at: t, lp: 2400, lp2: 800 }); }
-  function i808(t, m, dur, to) { M({ type: 'sine', f: mtof(m), f2: to ? mtof(to) : 0, slide: dur * 0.9, dur, v: 0.2, at: t, drive: true, lp: 1000 }); }
+  function iLead(t, m, dur, o) {
+    o = o || {}; leadPan = -leadPan;
+    M({ role: o.role || 'lead', type: o.type || 'square', f: mtof(m), dur, v: o.v || 0.022, at: t, lp: o.lp || 2600, lp2: o.lp2 || 700, a: o.a, det: o.det, hold: o.hold, pan: o.pan !== undefined ? o.pan : leadPan });
+  }
+  function iPad(t, ch, dur, v, type, lp) { ch.forEach((m, i) => M({ role: 'pad', type: type || 'triangle', f: mtof(m), dur, a: 0.35, v: v || 0.026, at: t, lp: lp || 1500, pan: ch.length > 1 ? (i / (ch.length - 1) - 0.5) * 0.7 : 0 })); }
+  function iBell(t, m, v, dur, pan) {
+    const p = pan !== undefined ? pan : rnd(-0.5, 0.5);
+    M({ role: 'bell', type: 'sine', f: mtof(m), dur: dur || 1.4, v: v || 0.03, at: t, pan: p });
+    M({ role: 'bell', type: 'sine', f: mtof(m) * 2.76, dur: (dur || 1.4) * 0.4, v: (v || 0.03) * 0.25, at: t, pan: p });
+  }
+  function iCow(t, m, v) { const f = mtof(m); v = v || 0.045; M({ role: 'lead', type: 'square', f, dur: 0.17, v, at: t, lp: 2400, lp2: 800 }); M({ role: 'lead', type: 'square', f: f * 1.505, dur: 0.12, v: v * 0.55, at: t, lp: 2400, lp2: 800 }); }
+  function i808(t, m, dur, to) { M({ role: 'bass', type: 'sine', f: mtof(m), f2: to ? mtof(to) : 0, slide: dur * 0.9, dur, v: 0.2, at: t, drive: true, lp: 1000 }); }
+  // the big wide sound: three detuned saws per note, spread left / centre / right
+  function iSaw(t, ch, dur, o) {
+    o = o || {};
+    const v = o.v || 0.01, sp = o.spread || 0.75, det = o.det || 14;
+    for (const m of ch) for (const [dt, p] of [[-det, -sp], [0, 0], [det, sp]]) M({ role: o.role || 'pad', type: 'sawtooth', f: mtof(m), det: dt, dur, a: o.a || 0.25, v, at: t, lp: o.lp || 2400, lp2: o.lp2 || o.lp || 2400, q: 0.7, hold: o.hold, pan: p });
+  }
+  function iPluck(t, m, o) { o = o || {}; M({ role: o.role || 'arp', type: o.type || 'sawtooth', f: mtof(m), dur: o.dur || 0.22, v: o.v || 0.02, at: t, lp: o.lp || 3200, lp2: 260, q: 3, det: o.det, pan: o.pan }); }
+  function iCrash(t, v = 0.05) { MN({ role: 'fx', ft: 'highpass', f: 5200, dur: 1.6, v, at: t, pan: -0.35 }); MN({ role: 'fx', ft: 'highpass', f: 6600, dur: 1.4, v: v * 0.8, at: t + 0.009, pan: 0.35 }); }
+  function iTom(t, m, v = 0.16, pan = 0) { M({ role: 'snare', type: 'sine', f: mtof(m), f2: mtof(m - 7), slide: 0.25, dur: 0.32, v, at: t, pan }); MN({ role: 'snare', ft: 'lowpass', f: 900, dur: 0.08, v: v * 0.3, at: t, pan }); }
+  function iRiser(t, len, v = 0.04) { MN({ role: 'fx', ft: 'bandpass', f: 400, f2: 7000, q: 2, a: len * 0.92, dur: len * 0.08, v, at: t }); }
+  function iChoir(t, ch, dur, v = 0.016) { // «аах»: saws through two vowel formants
+    ch.forEach((m, i) => { for (const [f, q, k] of [[730, 6, 1], [1090, 8, 0.6]]) M({ role: 'pad', type: 'sawtooth', f: mtof(m), dur, a: 0.6, v: v * k, at: t, bp: f, q, det: i % 2 ? 7 : -7, hold: 0.8, pan: (i / Math.max(1, ch.length - 1) - 0.5) * 0.8 }); });
+  }
+  const melLen = (arr, i, max) => { let n = 1; while (n < max && !arr[(i + n) % arr.length]) n++; return n; };
 
   /* ---------- music: tracks (step = 16th note) ---------- */
   const CH = [[57, 60, 64], [53, 57, 60], [48, 52, 55], [55, 59, 62]];
   const CHB = [[57, 60, 64], [58, 62, 65], [53, 57, 60], [52, 56, 59]];
   function tSpark(s, t, d, I, B) {
     const prog = B ? CHB : CH, bar = Math.floor(s / 16) % 4, st = s % 16, ch = prog[bar];
-    if (st === 0) for (const m of ch) { M({ type: 'triangle', f: mtof(m), dur: 16 * d, a: 0.35, v: 0.03, at: t, lp: 1500 }); M({ type: 'sawtooth', f: mtof(m - 12), det: 7, dur: 16 * d, a: 0.5, v: 0.012, at: t, lp: 800 }); }
+    if (st === 0) { iPad(t, ch, 16 * d, 0.03, 'triangle', 1500); iSaw(t, ch.map((m) => m - 12), 16 * d, { v: 0.005, a: 0.5, lp: 900, hold: 0.7 }); }
     if (st % 2 === 0) { const root = ch[0] - 24; iBass(t, (st % 8 === 6 || (B && st % 4 === 2)) ? root + 12 : root, d * 1.5, { lp: 520 + I * 260, lp2: 140, v: 0.075 }); }
-    if (I >= 1) { const seq = [0, 1, 2, 1, 2, 0, 1, 2]; iLead(t, ch[seq[st % 8]] + 12 + (st >= 8 && I >= 2 ? 12 : 0), d * 0.85, { v: 0.02, lp: 2400, lp2: 500 }); if (st % 4 === 2) iHat(t, 0.035); }
+    if (I >= 1) { const seq = [0, 1, 2, 1, 2, 0, 1, 2]; iLead(t, ch[seq[st % 8]] + 12 + (st >= 8 && I >= 2 ? 12 : 0), d * 0.85, { role: 'arp', v: 0.02, lp: 2400, lp2: 500 }); if (st % 4 === 2) iHat(t, 0.035); }
     if (I >= 2) { if (st % 8 === 0 || (B && st % 4 === 0)) iKick(t); if (st % 8 === 4) iSnare(t, 0.06); if (B && st % 2 === 1) iHat(t, 0.02); }
   }
   const PH_PROG = [36, 36, 32, 31];
@@ -2156,38 +2247,39 @@ const SFX = (() => {
   function tDnb(s, t, d, I, B) {
     const bar = Math.floor(s / 16) % 4, st = s % 16, ch = DNB_CH[bar], root = ch[0] - 24;
     if (st === 0) {
-      iPad(t, ch, d * 14, 0.02, 'sawtooth', 900);
+      iSaw(t, ch, d * 14, { v: 0.0065, a: 0.2, lp: 1100, hold: 0.6 });
       iBass(t, root, d * 10, { det: 12, lp: 380, lp2: 250, q: 3, v: 0.065 });
       iBass(t, root, d * 10, { det: -12, lp: 380, lp2: 250, q: 3, v: 0.065 });
     }
     if (st === 11) iBass(t, root + 12, d * 5, { det: 10, lp: 520, lp2: 200, v: 0.055 });
     if (I >= 1 && st % 2 === 0) iHat(t, st % 4 === 2 ? 0.035 : 0.02);
     if (I >= 2) { if (st === 0 || st === 10) iKick(t, 0.32); if (st === 4 || st === 12) iSnare(t, 0.08); if (st === 7 || st === 15) iSnare(t, 0.022); }
-    if (I >= 3 || B) { const seq = [0, 1, 2, 1]; iLead(t, ch[seq[st % 4]] + 24, d * 0.8, { v: 0.015, lp: 3200 }); }
+    if (I >= 3 || B) { const seq = [0, 1, 2, 1]; iLead(t, ch[seq[st % 4]] + 24, d * 0.8, { role: 'arp', v: 0.015, lp: 3200 }); }
+    if (B && st === 0 && bar === 0) iCrash(t, 0.04);
   }
   const CHIP_MEL = [76, 0, 79, 0, 81, 0, 79, 76, 74, 0, 76, 0, 72, 0, 0, 0, 76, 0, 79, 0, 81, 0, 84, 0, 83, 0, 81, 0, 79, 0, 0, 0];
   function tChip(s, t, d, I, B) {
     const bar = Math.floor(s / 16) % 4, st = s % 16, ch = CH[bar];
     if (st % 2 === 0) iBass(t, ch[0] - 12 + (st % 4 === 2 ? 12 : 0), d * 1.6, { type: 'triangle', lp: 3000, lp2: 2000, q: 0.5, v: 0.09 });
     const m = CHIP_MEL[s % 32];
-    if (m && I >= 1) iLead(t, m, d * 1.7, { type: 'square', v: 0.022, lp: 4000, lp2: 2500 });
+    if (m && I >= 1) iLead(t, m, d * 1.7, { type: 'square', v: 0.022, lp: 4000, lp2: 2500, pan: 0 });
     if (I === 0 && st % 4 === 0) iLead(t, ch[(st / 4) % 3] + 12, d * 3, { type: 'square', v: 0.011, lp: 2000, lp2: 900 });
     if (I >= 2) {
-      iLead(t, ch[st % 3] + 24, d * 0.5, { type: 'square', v: 0.007, lp: 5000, lp2: 3000 });
-      if (st % 8 === 0) M({ type: 'square', f: 110, f2: 40, slide: 0.06, dur: 0.07, v: 0.08, at: t, lp: 800 });
-      if (st % 8 === 4) MN({ ft: 'highpass', f: 1500, dur: 0.08, v: 0.05, at: t });
-      if (st % 4 === 2) MN({ ft: 'highpass', f: 6000, dur: 0.02, v: 0.025, at: t });
+      iLead(t, ch[st % 3] + 24, d * 0.5, { role: 'arp', type: 'square', v: 0.007, lp: 5000, lp2: 3000 });
+      if (st % 8 === 0) { M({ role: 'kick', type: 'square', f: 110, f2: 40, slide: 0.06, dur: 0.07, v: 0.08, at: t, lp: 800 }); duck(t, 0.35, 0.16); }
+      if (st % 8 === 4) MN({ role: 'snare', ft: 'highpass', f: 1500, dur: 0.08, v: 0.05, at: t });
+      if (st % 4 === 2) MN({ role: 'drum', ft: 'highpass', f: 6000, dur: 0.02, v: 0.025, at: t, pan: 0.2 });
     }
-    if (B && st % 2 === 1) MN({ ft: 'highpass', f: 7000, dur: 0.015, v: 0.018, at: t });
+    if (B && st % 2 === 1) MN({ role: 'drum', ft: 'highpass', f: 7000, dur: 0.015, v: 0.018, at: t, pan: -0.2 });
   }
   const ACID = [0, 0, 12, 0, 3, 0, 10, 0, 0, 7, 0, 12, 0, 3, 5, 0];
   const ACID_ACC = [1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 1, 0];
   function tAcid(s, t, d, I, B) {
     const st = s % 16, ph = (s % 64) / 64;
     const cut = 300 + 1700 * (0.5 + 0.5 * Math.sin(ph * TAU - 1.5)) + (B ? 600 : 0), acc = ACID_ACC[st];
-    if (I >= 1 || st % 2 === 0) iBass(t, 45 + ACID[st], d * (acc ? 0.95 : 0.7), { lp: cut * (acc ? 1.5 : 1), lp2: 180, q: 14, v: acc ? 0.06 : 0.045 });
-    if (st === 0 && s % 32 === 0) iPad(t, [57, 60, 64], d * 32, 0.013, 'sawtooth', 700);
-    if (I >= 1 && st % 4 === 0) iKick(t, 0.33);
+    if (I >= 1 || st % 2 === 0) M({ role: 'arp', type: 'sawtooth', f: mtof(45 + ACID[st]), dur: d * (acc ? 0.95 : 0.7), v: acc ? 0.06 : 0.045, at: t, lp: cut * (acc ? 1.5 : 1), lp2: 180, q: 14 });
+    if (st === 0 && s % 32 === 0) iSaw(t, [57, 60, 64], d * 32, { v: 0.004, a: 0.8, lp: 900, hold: 0.7 });
+    if (I >= 1 && st % 4 === 0) { iKick(t, 0.33); M({ role: 'bass', type: 'sine', f: mtof(33), dur: d * 3, v: 0.06, at: t + d * 2 }); }
     if (I >= 2) { if (st % 4 === 2) iHat(t, 0.03, true); if (st === 4 || st === 12) iClap(t, 0.055); if (st % 2 === 1) iHat(t, 0.014); }
     if (B && st % 4 === 3) iHat(t, 0.02);
   }
@@ -2195,8 +2287,8 @@ const SFX = (() => {
   const PENTA = [69, 72, 74, 76, 79, 81, 84];
   function tAmbient(s, t, d, I) {
     const bar2 = Math.floor(s / 32) % 4, st = s % 32;
-    if (st === 0) { iPad(t, AMB_CH[bar2], d * 34, 0.02, 'triangle', 1100); iPad(t, [AMB_CH[bar2][0] - 12], d * 34, 0.03, 'sine', 600); }
-    if (s % 2 === 0 && Math.random() < 0.13) iBell(t, pick(PENTA), 0.026, 1.6);
+    if (st === 0) { iPad(t, AMB_CH[bar2], d * 34, 0.02, 'triangle', 1100); iSaw(t, [AMB_CH[bar2][0], AMB_CH[bar2][2]], d * 34, { v: 0.0035, a: 1.2, lp: 1200, hold: 0.75, det: 9 }); iPad(t, [AMB_CH[bar2][0] - 12], d * 34, 0.03, 'sine', 600); }
+    if (s % 2 === 0 && Math.random() < 0.13) iBell(t, pick(PENTA), 0.026, 1.8);
     if (I >= 2 && st % 16 === 0) iKick(t, 0.18);
     if (I >= 3 && st % 4 === 2) iHat(t, 0.014);
   }
@@ -2205,21 +2297,122 @@ const SFX = (() => {
     const bar = Math.floor(s / 16) % 4, st = s % 16, ch = AR_CH[bar], root = ch[0] - 12;
     if (st % 4 === 2) iBass(t, root, d * 1.6, { lp: 900, lp2: 300, q: 4, v: 0.068 });
     if (I >= 1 && st % 4 === 0) iKick(t, 0.34, true);
-    if (st === 0 || st === 6 || st === 12) {
-      const v = I >= 1 ? 0.012 : 0.008;
-      for (const m of ch) { M({ type: 'sawtooth', f: mtof(m + 12), det: 9, dur: d * 2.2, v, at: t, lp: 3000, lp2: 900 }); M({ type: 'sawtooth', f: mtof(m + 12), det: -9, dur: d * 2.2, v, at: t, lp: 3000, lp2: 900 }); }
-    }
+    if (st === 0 || st === 6 || st === 12) iSaw(t, ch.map((m) => m + 12), d * 2.2, { role: 'lead', v: I >= 1 ? 0.008 : 0.0055, a: 0.004, lp: 3000, lp2: 900, det: 9, spread: 0.6 });
     if (I >= 2) { if (st === 4 || st === 12) iClap(t, 0.06); if (st % 2 === 1) iHat(t, 0.018); }
     if ((I >= 3 || B) && bar === 3 && st >= 8) iSnare(t, 0.03 + (st - 8) * 0.008);
+    if (B && bar === 0 && st === 0) iCrash(t, 0.045);
+  }
+  /* --- 2.6: six new tracks --- */
+  const NEB_CH = [[59, 62, 66], [59, 62, 67], [57, 62, 66], [57, 61, 64]], NEB_B = [47, 43, 50, 45];
+  const NEB_MEL = [74, 0, 0, 71, 0, 0, 69, 0, 71, 0, 0, 0, 67, 0, 69, 71, 74, 0, 0, 76, 0, 0, 78, 0, 76, 0, 0, 0, 73, 0, 0, 0];
+  function tNebula(s, t, d, I, B) {
+    const bar = Math.floor(s / 16) % 4, st = s % 16, ch = NEB_CH[bar], ph = Math.floor(s / 16) % 8;
+    if (st === 0) { iSaw(t, ch, d * 16, { v: 0.0065, a: 0.5, lp: 1900, hold: 0.8 }); iPad(t, [ch[0] - 12], d * 16, 0.02, 'sine', 500); }
+    if (st % 2 === 0) iBass(t, NEB_B[bar] + (st % 4 === 2 ? 12 : 0), d * 1.7, { lp: 500 + I * 150, lp2: 180, q: 3, v: I ? 0.058 : 0.034, sub: st % 4 === 0 ? 0.05 : 0 });
+    if (I >= 1 || st % 2 === 0) { const k = [0, 1, 2, 4, 2, 1, 2, 3][st % 8], m = k === 4 ? ch[0] + 24 : k === 3 ? ch[0] + 12 : ch[k] + 12; iPluck(t, m, { v: I ? 0.014 : 0.009, lp: 2600 + I * 500, dur: 0.18, pan: st % 2 ? 0.35 : -0.35 }); }
+    if (I >= 2) {
+      if (st % 8 === 0 || (I >= 3 && st % 4 === 0)) iKick(t, 0.3);
+      if (st === 4 || st === 12) iSnare(t, 0.07);
+      if (st % 4 === 2) iHat(t, 0.028, true);
+      const e8 = Math.floor(s / 2) % 32;
+      if (st % 2 === 0 && NEB_MEL[e8]) iLead(t, NEB_MEL[e8], d * 2 * melLen(NEB_MEL, e8, 6) * 0.9, { type: 'sawtooth', v: 0.015, lp: 2800, lp2: 1500, a: 0.02, hold: 0.6, pan: 0 });
+      if (ph === 7 && st === 0) iRiser(t, d * 16, 0.03);
+      if (ph === 0 && st === 0 && s > 0) iCrash(t, 0.035);
+    }
+    if (B && st % 2 === 1) iHat(t, 0.016);
+  }
+  const HY_CH = [[57, 60, 64], [57, 60, 65], [55, 60, 64], [55, 59, 62]], HY_B = [45, 41, 48, 43];
+  const HY_MEL = [76, 81, 84, 83, 81, 76, 81, 83, 84, 81, 77, 81, 84, 86, 84, 81, 79, 84, 88, 86, 84, 79, 84, 86, 83, 86, 79, 83, 86, 88, 86, 83];
+  function tHyper(s, t, d, I, B) {
+    const bar = Math.floor(s / 16) % 4, st = s % 16, ch = HY_CH[bar], ph = Math.floor(s / 16) % 8;
+    if (st === 0) iSaw(t, ch, d * 16, { v: I >= 2 ? 0.0055 : 0.007, a: 0.3, lp: I >= 2 ? 3200 : 1800, hold: 0.85 });
+    if (st % 4 === 2 || (I >= 2 && st % 4 === 3) || (I >= 3 && st % 4 === 1)) iBass(t, HY_B[bar], d * 0.9, { lp: 900, lp2: 260, q: 4, v: 0.058, sub: 0.04 });
+    if (I >= 1) { if (st % 4 === 0) iKick(t, 0.32); if (st % 4 === 2) iHat(t, 0.032, true); }
+    if (I >= 2) { if (st === 4 || st === 12) iClap(t, 0.06); if (st % 2 === 1) iHat(t, 0.013); }
+    if (I >= 2 && st % 2 === 0) { const m = HY_MEL[Math.floor(s / 2) % 32]; iPluck(t, m, { role: 'lead', v: 0.011, lp: 4200, dur: 0.24, det: 9, pan: -0.4 }); iPluck(t, m, { role: 'lead', v: 0.011, lp: 4200, dur: 0.24, det: -9, pan: 0.4 }); }
+    if (I < 2 && st % 2 === 0) iPluck(t, ch[(st / 2) % 3] + 12, { v: 0.011, lp: 2400, dur: 0.16, pan: st % 4 ? 0.3 : -0.3 });
+    if ((I >= 3 || B) && st % 2 === 1) iPluck(t, ch[(st >> 1) % 3] + 24, { v: 0.007, lp: 5000, dur: 0.1, pan: -0.45 });
+    if (I >= 2 && ph === 7) { if (st === 0) iRiser(t, d * 16, 0.035); if (st >= 8) iSnare(t, 0.02 + (st - 8) * 0.006); }
+    if ((I >= 2 && ph === 0 && st === 0 && s > 0) || (B && bar === 0 && st === 0)) iCrash(t, 0.04);
+  }
+  const DK_CH = [[52, 55, 59], [52, 55, 59], [52, 55, 60], [51, 54, 59]], DK_B = [40, 40, 36, 35];
+  const DK_MEL = [64, 0, 0, 67, 0, 66, 64, 0, 62, 0, 0, 64, 0, 0, 59, 0, 60, 0, 0, 64, 0, 67, 0, 72, 71, 0, 0, 0, 70, 0, 66, 0];
+  function tDark(s, t, d, I, B) {
+    const bar = Math.floor(s / 16) % 4, st = s % 16, ch = DK_CH[bar], root = DK_B[bar], ph = Math.floor(s / 16) % 8, acc = st % 4 === 0;
+    if (st === 0) iSaw(t, ch, d * 16, { v: 0.0055, a: 0.4, lp: 1300, hold: 0.8, det: 18 });
+    if (I >= 1 || st % 2 === 0) iBass(t, root + (st % 8 === 6 ? 12 : 0), d * 0.8, { lp: acc ? 1100 : 700, lp2: 200, q: 6, v: acc ? 0.062 : 0.046, drive: true, sub: acc ? 0.05 : 0 });
+    if (I >= 1 && st % 2 === 0) iPluck(t, ch[[0, 1, 2, 1, 0, 2, 1, 2][(st / 2) % 8]] + 24, { v: 0.009, lp: 2200, dur: 0.14, pan: st % 4 ? 0.4 : -0.4 });
+    if (I >= 2) {
+      if (st === 0 || st === 8 || (st === 10 && bar % 2 === 1)) iKick(t, 0.34, true);
+      if (st === 4 || st === 12) iSnare(t, 0.09);
+      if (st % 4 === 2) iHat(t, 0.024);
+      const e8 = Math.floor(s / 2) % 32;
+      if (st % 2 === 0 && DK_MEL[e8]) iLead(t, DK_MEL[e8] + 12, d * 2 * melLen(DK_MEL, e8, 4) * 0.9, { type: 'sawtooth', v: 0.014, lp: 2200, lp2: 900, det: 6, hold: 0.5 });
+      if (ph === 0 && st === 0 && s > 0) iCrash(t, 0.04);
+    }
+    if ((I >= 3 || B) && bar === 3 && st >= 8 && st % 2 === 0) iTom(t, 50 - (st - 8), 0.13, (st - 11) * 0.15);
+    if (B && st % 2 === 1) iHat(t, 0.014);
+  }
+  const FR_CH = [[54, 57, 61, 64], [54, 57, 62, 66], [52, 57, 61, 64], [52, 56, 59, 64]], FR_B = [42, 38, 45, 40];
+  const FR_PENT = [78, 81, 83, 85, 88, 90];
+  function tFrost(s, t, d, I, B) {
+    const bar = Math.floor(s / 16) % 4, st = s % 16, ch = FR_CH[bar], sw = st % 2 ? d * 0.22 : 0;
+    if (st === 0) { iSaw(t, ch, d * 16, { v: 0.0045, a: 0.6, lp: 1700, hold: 0.85, det: 10 }); iBass(t, FR_B[bar], d * 15, { type: 'sine', lp: 300, lp2: 220, q: 0.7, v: I ? 0.045 : 0.028, hold: 0.8 }); }
+    if (st % 3 === 0 && (s * 7) % 5 !== 1) iBell(t + sw, FR_PENT[(s * 5 + bar) % FR_PENT.length], I ? 0.02 : 0.016, 1.3);
+    if (I >= 1 && (st % 2 === 1 || st % 4 === 2)) iHat(t + sw, st % 4 === 2 ? 0.028 : 0.014);
+    if (I >= 2) {
+      if (st === 0 || st === 10 || (bar % 2 === 1 && st === 7)) iKick(t + sw, 0.3);
+      if (st === 4 || st === 12) { iSnare(t, 0.06); iClap(t, 0.035); }
+      if (st % 4 === 3) iPluck(t + sw, ch[(st >> 2) % 4] + 12, { v: 0.011, lp: 3000, dur: 0.16, type: 'triangle' });
+    }
+    if ((I >= 3 || B) && st % 2 === 0) iPluck(t, FR_PENT[(st / 2 + bar * 3) % 6], { v: 0.007, lp: 6000, dur: 0.12, type: 'square', pan: st % 4 ? 0.5 : -0.5 });
+  }
+  const INF_RIFF = [0, 0, 12, 0, 0, 3, 0, 0, 7, 0, 0, 12, 0, 10, 0, 7];
+  function tInferno(s, t, d, I, B) {
+    const bar = Math.floor(s / 16) % 4, st = s % 16, ph = Math.floor(s / 16) % 8, root = bar === 3 ? 34 : 36;
+    if (st % 4 === 0 && (I >= 1 || st === 0)) iKick(t, 0.36, true);
+    if (st % 4 === 2 && I >= 1) M({ role: 'bass', type: 'sine', f: mtof(root), dur: d * 1.6, v: 0.07, at: t, lp: 260, drive: true });
+    const cut = 500 + 1600 * (0.5 + 0.5 * Math.sin(((s % 64) / 64) * TAU)) + (B ? 700 : 0);
+    if (I >= 1 || st % 2 === 0) M({ role: 'arp', type: 'sawtooth', f: mtof(root + 12 + INF_RIFF[st]), dur: d * 0.7, v: 0.04, at: t, lp: cut, lp2: 220, q: 9, drive: true, pan: st % 2 ? 0.2 : -0.2 });
+    if (I >= 2) {
+      if (st === 4 || st === 12) iClap(t, 0.065);
+      iHat(t, st % 4 === 2 ? 0.03 : 0.012, st % 4 === 2);
+      if ((st === 6 || st === 14) && bar % 2 === 0) iSaw(t, bar === 2 ? [63, 67, 70] : [60, 63, 67], d * 1.3, { role: 'lead', v: 0.006, a: 0.004, lp: 2600, lp2: 800 });
+      if (ph === 0 && st === 0 && s > 0) iCrash(t, 0.04);
+    }
+    if (I >= 3 && (st === 3 || st === 11)) { M({ role: 'drum', type: 'square', f: 820, dur: 0.07, v: 0.012, at: t, lp: 5000, pan: 0.45 }); M({ role: 'drum', type: 'square', f: 1190, dur: 0.05, v: 0.01, at: t, lp: 5000, pan: -0.45 }); }
+    if (B && st === 0 && bar % 2 === 0) M({ role: 'fx', type: 'sawtooth', f: mtof(84), f2: mtof(79), slide: d * 8, dur: d * 8, v: 0.007, at: t, lp: 3000 });
+  }
+  const EP_CH = [[62, 65, 69], [58, 62, 65], [57, 60, 65], [55, 60, 64]], EP_CHB = [[62, 65, 69], [58, 62, 65], [55, 58, 62], [57, 61, 64]];
+  const EP_B = [38, 34, 41, 36], EP_BB = [38, 34, 43, 45];
+  const EP_MEL = [[74, 0, 77, 76], [74, 0, 70, 0], [72, 0, 77, 79], [76, 0, 0, 0]];
+  function tEpic(s, t, d, I, B) {
+    const bar = Math.floor(s / 16) % 4, st = s % 16, ch = (B ? EP_CHB : EP_CH)[bar], root = (B ? EP_BB : EP_B)[bar], ph = Math.floor(s / 16) % 8;
+    if (st === 0) {
+      iChoir(t, ch, d * 16, 0.013);
+      iSaw(t, ch.map((m) => m - 12), d * 16, { v: 0.0045, a: 0.5, lp: 1400, hold: 0.85 });
+      M({ role: 'bass', type: 'sawtooth', f: mtof(root), dur: d * 16, a: 0.3, v: 0.05, at: t, lp: 700, hold: 0.85 });
+      M({ role: 'bass', type: 'sine', f: mtof(root - 12), dur: d * 16, a: 0.1, v: 0.07, at: t, hold: 0.85 });
+    }
+    if (I >= 1 && st % 2 === 0) iPluck(t, ch[[0, 1, 2, 1][(st / 2) % 4]] + 12, { v: 0.012, lp: 2400, dur: 0.2, pan: st % 4 ? 0.3 : -0.3 });
+    if (I >= 1 && (st === 0 || st === 3 || st === 6 || (I >= 2 && (st === 10 || st === 11)))) iTom(t, st === 0 ? 40 : 45, st === 0 ? 0.2 : 0.13, st === 3 ? -0.4 : st === 6 ? 0.4 : 0);
+    if (I >= 2) { if (st === 0) iKick(t, 0.3, true); if (st === 8) iSnare(t, 0.1); if (st % 4 === 2) iHat(t, 0.02); }
+    if ((I >= 3 || B) && st % 4 === 0) { const q = EP_MEL[bar][st >> 2]; if (q) iLead(t, q, d * 4 * (EP_MEL[bar][(st >> 2) + 1] === 0 ? 2 : 1) * 0.95, { type: 'sawtooth', v: 0.016, lp: 3000, lp2: 1800, a: 0.03, hold: 0.7, pan: 0 }); }
+    if (ph === 0 && st === 0 && s > 0) iCrash(t, 0.05);
+    if (I >= 2 && ph === 7 && st >= 8) iTom(t, 47 - (st - 8), 0.1, (st - 11) * 0.12);
   }
   const TR = {
     // vol: loudness trims, measured (K-weighted RMS at in-run intensity) so every track sits at the same level
-    spark: { bpm: 118, bossBpm: 132, fn: tSpark, vol: 0.92 }, phonk: { bpm: 132, fn: tPhonk, vol: 0.42 }, dnb: { bpm: 172, fn: tDnb, vol: 1.05 },
-    chip: { bpm: 144, fn: tChip, vol: 2.2 }, acid: { bpm: 128, fn: tAcid, vol: 0.82 }, ambient: { bpm: 72, fn: tAmbient, vol: 2.6 }, arena: { bpm: 150, fn: tArena, vol: 0.64 },
+    spark: { bpm: 118, bossBpm: 132, fn: tSpark, vol: 1.01 }, phonk: { bpm: 132, fn: tPhonk, vol: 0.57 }, dnb: { bpm: 172, fn: tDnb, vol: 1.09 },
+    chip: { bpm: 144, fn: tChip, vol: 2.25 }, acid: { bpm: 128, fn: tAcid, vol: 0.76 }, ambient: { bpm: 72, fn: tAmbient, vol: 2.0 }, arena: { bpm: 150, fn: tArena, vol: 0.52 },
+    nebula: { bpm: 100, fn: tNebula, vol: 1.19 }, hyper: { bpm: 138, bossBpm: 142, fn: tHyper, vol: 0.81 }, dark: { bpm: 108, bossBpm: 116, fn: tDark, vol: 0.94 },
+    frost: { bpm: 130, fn: tFrost, vol: 0.68 }, inferno: { bpm: 145, bossBpm: 150, fn: tInferno, vol: 0.65 }, epic: { bpm: 88, bossBpm: 92, fn: tEpic, vol: 0.89 },
   };
+  let lastBpm = 0;
   function tick() {
     if (!live() || !musicOn) return;
     const tr = TR[track] || TR.spark, bpm = (boss && tr.bossBpm) || tr.bpm, d16 = 60 / bpm / 4;
+    if (bpm !== lastBpm && delayNodes) { lastBpm = bpm; for (const dn of delayNodes) dn.delayTime.setTargetAtTime(Math.min(1.9, d16 * 3), ac.currentTime, 0.05); }
     if (nextT < ac.currentTime) nextT = ac.currentTime + 0.03;
     while (nextT < ac.currentTime + 0.14) { try { tr.fn(step, nextT, d16, intensity, boss); } catch (e) { /* ignore */ } nextT += d16; step++; }
   }
@@ -7766,7 +7959,7 @@ function initUI() {
     if (E.np) E.np.innerHTML = trackLabel();
     if (UI.cur === 'settings') renderSettingsKeep();
   });
-  on('newsBtn', () => { SFX.init(); SFX.musicStart(); SFX.play('click'); SAVE.seen2 = 1; SAVE.seen21 = 1; SAVE.seen24 = 1; SAVE.seen25 = 1; persist(); toMenu(); });
+  on('newsBtn', () => { SFX.init(); SFX.musicStart(); SFX.play('click'); SAVE.seen2 = 1; SAVE.seen21 = 1; SAVE.seen24 = 1; if (UI.cur === 'news' && document.querySelector('#scr-news .ttl').textContent.includes('2.6')) SAVE.seen26 = 1; SAVE.seen25 = 1; persist(); toMenu(); });
   on('rerollBtn', rerollCards);
   on('chestBtn', () => { if (STATE !== 'chest' || performance.now() < chestReadyT) return; SFX.play('click'); resume(); });
   on('pauseBtn', () => { SFX.play('click'); pauseGame(); });
@@ -8211,7 +8404,7 @@ window.__appBack = () => {
     case 'pause': if (UI.cur === 'settings') { UI.show('pause'); return ''; } resume(); return '';
     case 'levelup': case 'chest': return '';
     case 'over': toMenu(); return '';
-    case 'news': SAVE.seen2 = 1; SAVE.seen21 = 1; SAVE.seen24 = 1; SAVE.seen25 = 1; persist(); toMenu(); return '';
+    case 'news': SAVE.seen2 = 1; SAVE.seen21 = 1; SAVE.seen24 = 1; if (document.querySelector('#scr-news .ttl').textContent.includes('2.6')) SAVE.seen26 = 1; SAVE.seen25 = 1; persist(); toMenu(); return '';
     case 'stages': openChars(false); return '';
     case 'reg': return 'exit';
     case 'codex': openProfile(); return '';
@@ -8231,7 +8424,7 @@ function needsReg() { return !SAVE.profile.login && !SAVE.nick && !((SAVE.tot.ru
 function regCloud() { return !!PROF.db && PROF.canWrite !== false; }
 function openReg() { STATE = 'reg'; REG.mode = 'new'; REG.drawn = ''; renderReg(); UI.show('reg'); }
 function regDone(name, how) {
-  SAVE.nick = name; SAVE.seen2 = 1; SAVE.seen21 = 1; SAVE.seen24 = 1; SAVE.seen25 = 1;
+  SAVE.nick = name; SAVE.seen2 = 1; SAVE.seen21 = 1; SAVE.seen24 = 1; SAVE.seen25 = 1; SAVE.seen26 = 1;
   persist(); SFX.init(); SFX.musicStart(); SFX.play('buy');
   toMenu();
   UI.note('Привет, ' + name + '!', how, 'user');
@@ -9097,6 +9290,20 @@ window.__appUpdate = (v) => {
   renderUpdBtn();
   if (STATE === 'menu') UI.note('ОБНОВЛЕНИЕ ' + UPD.ver, 'скачано — нажми кнопку в меню', 'refresh');
 };
+function showNews26() {
+  STATE = 'news';
+  const items = [
+    ['music', '6 новых треков: Туманность, Гиперпрыжок, Тьма, Лёд, Инферно и Финал'],
+    ['sparkle', 'Объёмный звук: стерео, эхо и простор — в наушниках особенно кайфово'],
+    ['map', 'У каждой главы «Уровней» — своя музыка'],
+    ['crown', 'Великие боссы и Ядро — под эпичный «Финал», Колосс и Призрак — под «Тьму»'],
+    ['wave', 'Бас качает в такт бочке, перед кульминацией — нарастание и тарелки'],
+  ];
+  document.querySelector('#scr-news .ttl').textContent = 'ОБНОВЛЕНИЕ 2.6 · ЗВУК';
+  E.newsList.innerHTML = items.map(([ic, t], i) => `<div class="ni" style="animation-delay:${0.1 + i * 0.08}s">${icon(ic)}<span>${t}</span></div>`).join('');
+  E.newsBonus.innerHTML = 'Лучше всего — в наушниках 🎧';
+  UI.show('news');
+}
 function initUI25() {
   const ids = { stgPanel: 'stgPanel', stgCh: 'stgCh', stgName: 'stgName', stgPrev: 'stgPrev', stgNext: 'stgNext', stgStars: 'stgStars', stgScroll: 'stgScroll', stgMap: 'stgMap', stgInfo: 'stgInfo', stgGo: 'stgGo', stageBar: 'stageBar', resStars: 'resStars', profTitle: 'profTitle' };
   for (const k in ids) E[k] = document.getElementById(ids[k]);
@@ -9263,6 +9470,7 @@ function boot() {
   toMenu();
   if (needsReg()) openReg(); // brand-new player: sign up first
   else if (firstV25) showNews25(bonus);
+  else if (!SAVE.seen26) showNews26();
   else if (APP && !SAVE.seen252) { SAVE.seen252 = 1; persist(); setTimeout(() => UI.note('АВТООБНОВЛЕНИЕ РАБОТАЕТ', 'версия ' + GAME_VER + ' пришла сама', 'refresh'), 1500); }
   else if (firstV2 && !APP) showNews(bonus);
   else if (firstV21) showNews(bonus, true);
