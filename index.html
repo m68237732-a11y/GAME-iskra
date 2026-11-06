@@ -929,7 +929,7 @@ function fmtNum(n) { n = Math.round(n); if (n >= 1e6) return (n / 1e6).toFixed(1
 function vib(p) { if (!SAVE.set.vib) return; try { if (navigator.vibrate) navigator.vibrate(p); } catch (e) { /* ignore */ } }
 
 /* ================= save ================= */
-const GAME_VER = '2.6';
+const GAME_VER = '2.6.1';
 const SAVE_KEY = 'iskra.save.v1';
 const APP = typeof window.IskraApp !== 'undefined'; // running inside the Android app
 const FRZ = { st: '', dirty: false }; // frozen-world redraw state (see frame())
@@ -9455,6 +9455,11 @@ function prewarm() {
   beamSprite('#ff2a6d'); beamSprite('#ff7aa6'); beamSprite(C.beam); RAINBOW.forEach(beamSprite);
 }
 function boot() {
+  // a downloaded update opened from app storage must see the same saves; if it does not, go back to the built-in game
+  if (APP && window.IskraApp.fallback && location.protocol === 'file:' && location.href.indexOf('android_asset') < 0) {
+    let has = false; try { has = !!localStorage.getItem(SAVE_KEY); } catch (e) { /* no storage */ }
+    if (!has) { try { window.IskraApp.fallback(); return; } catch (e) { /* carry on */ } }
+  }
   setGfxSetting();
   resize();
   buildStars();
@@ -9471,7 +9476,7 @@ function boot() {
   if (needsReg()) openReg(); // brand-new player: sign up first
   else if (firstV25) showNews25(bonus);
   else if (!SAVE.seen26) showNews26();
-  else if (APP && !SAVE.seen252) { SAVE.seen252 = 1; persist(); setTimeout(() => UI.note('АВТООБНОВЛЕНИЕ РАБОТАЕТ', 'версия ' + GAME_VER + ' пришла сама', 'refresh'), 1500); }
+  else if (APP && location.href.indexOf('android_asset') < 0 && SAVE.updSeen !== GAME_VER) { SAVE.updSeen = GAME_VER; persist(); setTimeout(() => UI.note('ОБНОВЛЕНО ДО ' + GAME_VER, 'пришло само, без переустановки', 'refresh'), 1500); }
   else if (firstV2 && !APP) showNews(bonus);
   else if (firstV21) showNews(bonus, true);
   else if (firstV24) showNews(bonus, false, true);
@@ -9484,6 +9489,7 @@ function boot() {
   requestAnimationFrame(frame);
   setTimeout(cloudInit, 0);
   MYMUS.load();
+  if (APP && window.IskraApp.ok) try { window.IskraApp.ok(); } catch (e) { /* older app */ }
 }
 window.__iskra = {
   get G() { return G; }, get STATE() { return STATE; }, get SAVE() { return SAVE; }, INPUT,
