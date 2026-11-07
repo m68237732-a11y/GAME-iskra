@@ -355,6 +355,16 @@ h2.ttl{font-family:var(--ff);font-weight:900;font-size:24px;letter-spacing:.08em
 .trk.on{border-color:rgba(77,243,255,.55);background:rgba(77,243,255,.09)}
 .trk.on svg{color:#4df3ff}
 .trk.mine svg{color:#ffd34d}
+.trk.spot svg{color:#1ed760}
+.trk.spot.on{border-color:rgba(30,215,96,.6);background:rgba(30,215,96,.09)}
+.sp-list{background:rgba(30,215,96,.04);border-color:rgba(30,215,96,.28)}
+.sp-list .my-row.cur .my-nm{border-color:rgba(30,215,96,.6);background:rgba(30,215,96,.09)}
+.sp-list .my-row.cur .my-nm svg{color:#1ed760}
+.sp-ctl{display:flex;gap:6px}
+.sp-ctl .btn{flex:1;padding:10px 4px;font-size:14px;letter-spacing:0}
+.sp-ctl .sp-main{flex:1.4;color:#1ed760}
+.sp-ctl .sp-act{color:#1ed760;border-color:rgba(30,215,96,.5)}
+.sp-err{font-size:11px;color:#ffb36b;text-align:center;padding:0 6px 2px}
 .my-list{display:flex;flex-direction:column;gap:6px;margin:-2px 0 4px;padding:8px;border-radius:12px;background:rgba(255,211,77,.04);border:1px dashed rgba(255,211,77,.25)}
 .my-row{display:flex;align-items:center;gap:6px}
 .my-nm{flex:1;min-width:0;display:flex;align-items:center;gap:9px;padding:9px 10px;border-radius:10px;background:rgba(255,255,255,.03);border:1px solid rgba(255,255,255,.06);text-align:left}
@@ -929,7 +939,7 @@ function fmtNum(n) { n = Math.round(n); if (n >= 1e6) return (n / 1e6).toFixed(1
 function vib(p) { if (!SAVE.set.vib) return; try { if (navigator.vibrate) navigator.vibrate(p); } catch (e) { /* ignore */ } }
 
 /* ================= save ================= */
-const GAME_VER = '2.7';
+const GAME_VER = '2.8';
 const SAVE_KEY = 'iskra.save.v1';
 const APP = typeof window.IskraApp !== 'undefined'; // running inside the Android app
 const FRZ = { st: '', dirty: false }; // frozen-world redraw state (see frame())
@@ -2534,6 +2544,7 @@ const SFX = (() => {
     musicStart() {
       want = true;
       if (!ac) return;
+      if (SPOT.active()) { musicOn = false; clearInterval(timer); timer = null; stopBaked(0.3); MYMUS.pause(); return; }
       if (MYMUS.active()) { musicOn = false; clearInterval(timer); timer = null; stopBaked(0.3); MYMUS.play(); return; }
       MYMUS.pause();
       if (musicOn) return;
@@ -2544,7 +2555,7 @@ const SFX = (() => {
     _bk: () => ({ track: BK.track, keys: Object.keys(BK.bufs), playing: BK.key, busy: BK.busy, q: BK.queue.length }),
     ctx: () => ac, musicBus: () => musBus, musVol: () => musVol, wantsMusic: () => want,
     setMusic(i, b) { intensity = i; boss = !!b; },
-    setTrack(id) { if (!TR[id] || id === track || MYMUS.active()) return; track = id; step = 0; if (musTrim) musTrim.gain.setTargetAtTime(TR[id].vol || 1, ac.currentTime, 0.08); },
+    setTrack(id) { if (!TR[id] || id === track || MYMUS.active() || SPOT.active()) return; track = id; step = 0; if (musTrim) musTrim.gain.setTargetAtTime(TR[id].vol || 1, ac.currentTime, 0.08); },
     get track() { return track; },
     duck(v) { musVol = v; applyVol(); },
     get on() { return !!ac; },
@@ -2718,6 +2729,258 @@ const MYMUS = (() => {
     playing: () => !!(au && !au.paused),
     onChange(fn) { onChange = fn; },
     MAX_TRACKS,
+  };
+})();
+
+/* ================= Spotify: the player's own account plays in the Spotify app, the game picks what ================= */
+const SPOT = (() => {
+  const CID = 'b4be51554c39440ab88c8babeb6872aa', REDIR = 'iskra://spotify';
+  const SCOPES = 'user-read-playback-state user-modify-playback-state user-read-currently-playing playlist-read-private playlist-read-collaborative user-library-read';
+  const LS = 'iskra-spot', LSP = 'iskra-spot-pkce', API = 'https://api.spotify.com/v1';
+  const rd = (k) => { try { return JSON.parse(localStorage.getItem(k) || 'null'); } catch (e) { return null; } };
+  const wr = (k, v) => { try { if (v == null) localStorage.removeItem(k); else localStorage.setItem(k, JSON.stringify(v)); } catch (e) { /* storage off */ } };
+  let tok = rd(LS); // { at, rt, exp, name, uid }
+  let lists = null, now = null, err = '', busy = '', onChange = null, pend = null, pendTries = 0, pollT = 0, native = false, refreshing = null;
+  const changed = () => { if (onChange) try { onChange(); } catch (e) { /* ui gone */ } };
+  const bridge = (n) => APP && window.IskraApp && typeof window.IskraApp[n] === 'function';
+  const canLogin = () => bridge('openUrl');
+
+  /* ---- http: fetch first; inside the app fall back to the native client if the webview blocks it ---- */
+  const NQ = {}; let nid = 0;
+  window.__spotHttp = (id, status, text) => { const f = NQ[id]; delete NQ[id]; if (f) f({ status, text: text || '' }); };
+  function nat(method, url, headers, body) {
+    return new Promise((res) => {
+      const id = ++nid; NQ[id] = res;
+      try { window.IskraApp.http(id, method, url, JSON.stringify(headers || {}), body || ''); } catch (e) { delete NQ[id]; res({ status: 0, text: '' }); }
+      setTimeout(() => { if (NQ[id]) { delete NQ[id]; res({ status: 0, text: '' }); } }, 15000);
+    });
+  }
+  async function http(method, url, headers, body) {
+    if (native && bridge('http')) return nat(method, url, headers, body);
+    try {
+      const r = await fetch(url, { method, headers, body: body || undefined, cache: 'no-store' });
+      return { status: r.status, text: await r.text() };
+    } catch (e) {
+      if (bridge('http')) { native = true; return nat(method, url, headers, body); }
+      return { status: 0, text: '' };
+    }
+  }
+  const form = (o) => Object.keys(o).map((k) => encodeURIComponent(k) + '=' + encodeURIComponent(o[k])).join('&');
+  const js = (t) => { try { return JSON.parse(t); } catch (e) { return null; } };
+
+  /* ---- PKCE ---- */
+  function rnd(n) {
+    const a = new Uint8Array(n), abc = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~';
+    try { crypto.getRandomValues(a); } catch (e) { for (let i = 0; i < n; i++) a[i] = Math.random() * 256 | 0; }
+    let s = ''; for (let i = 0; i < n; i++) s += abc[a[i] % abc.length];
+    return s;
+  }
+  function sha256js(bytes) { // fallback when crypto.subtle is missing
+    const K = [0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da, 0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070, 0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3, 0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2];
+    const H = [0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19];
+    const l = bytes.length, n = ((l + 9 + 63) >> 6) << 6, m = new Uint8Array(n);
+    m.set(bytes); m[l] = 0x80; const bits = l * 8; m[n - 4] = bits >>> 24; m[n - 3] = bits >>> 16; m[n - 2] = bits >>> 8; m[n - 1] = bits;
+    const W = new Uint32Array(64), ror = (x, r) => (x >>> r) | (x << (32 - r));
+    for (let o = 0; o < n; o += 64) {
+      for (let i = 0; i < 16; i++) W[i] = (m[o + i * 4] << 24) | (m[o + i * 4 + 1] << 16) | (m[o + i * 4 + 2] << 8) | m[o + i * 4 + 3];
+      for (let i = 16; i < 64; i++) { const a = W[i - 15], b = W[i - 2]; W[i] = (W[i - 16] + (ror(a, 7) ^ ror(a, 18) ^ (a >>> 3)) + W[i - 7] + (ror(b, 17) ^ ror(b, 19) ^ (b >>> 10))) | 0; }
+      let [a, b, c, d, e, f, g, h] = H;
+      for (let i = 0; i < 64; i++) {
+        const t1 = (h + (ror(e, 6) ^ ror(e, 11) ^ ror(e, 25)) + ((e & f) ^ (~e & g)) + K[i] + W[i]) | 0;
+        const t2 = ((ror(a, 2) ^ ror(a, 13) ^ ror(a, 22)) + ((a & b) ^ (a & c) ^ (b & c))) | 0;
+        h = g; g = f; f = e; e = (d + t1) | 0; d = c; c = b; b = a; a = (t1 + t2) | 0;
+      }
+      H[0] = (H[0] + a) | 0; H[1] = (H[1] + b) | 0; H[2] = (H[2] + c) | 0; H[3] = (H[3] + d) | 0; H[4] = (H[4] + e) | 0; H[5] = (H[5] + f) | 0; H[6] = (H[6] + g) | 0; H[7] = (H[7] + h) | 0;
+    }
+    const out = new Uint8Array(32);
+    for (let i = 0; i < 8; i++) { out[i * 4] = H[i] >>> 24; out[i * 4 + 1] = H[i] >>> 16; out[i * 4 + 2] = H[i] >>> 8; out[i * 4 + 3] = H[i]; }
+    return out;
+  }
+  async function challenge(v) {
+    const bytes = new TextEncoder().encode(v);
+    let h;
+    try { h = new Uint8Array(await crypto.subtle.digest('SHA-256', bytes)); } catch (e) { h = sha256js(bytes); }
+    let s = ''; for (const b of h) s += String.fromCharCode(b);
+    return btoa(s).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  }
+
+  async function login() {
+    if (!canLogin()) { err = APP ? 'old-app' : 'web'; changed(); return; }
+    const v = rnd(64), st = rnd(16);
+    wr(LSP, { v, st, t: Date.now() });
+    const url = 'https://accounts.spotify.com/authorize?' + form({ response_type: 'code', client_id: CID, scope: SCOPES, redirect_uri: REDIR, state: st, code_challenge_method: 'S256', code_challenge: await challenge(v) });
+    err = ''; busy = 'login'; changed();
+    try { window.IskraApp.openUrl(url); } catch (e) { busy = ''; err = 'open'; changed(); }
+  }
+  // the app hands us iskra://spotify?code=…&state=… after the browser login
+  window.__spotifyAuth = async (u) => {
+    if (!u && bridge('takeAuth')) try { u = window.IskraApp.takeAuth(); } catch (e) { u = ''; }
+    if (!u) return;
+    const q = {};
+    (String(u).split('?')[1] || '').split('#')[0].split('&').forEach((p) => { const i = p.indexOf('='); if (i > 0) q[decodeURIComponent(p.slice(0, i))] = decodeURIComponent(p.slice(i + 1).replace(/\+/g, ' ')); });
+    const pk = rd(LSP);
+    busy = '';
+    if (q.error || !q.code) { err = q.error === 'access_denied' ? 'denied' : 'auth'; changed(); return; }
+    if (!pk || pk.st !== q.state) { err = 'auth'; changed(); return; }
+    busy = 'token'; changed();
+    const r = await http('POST', 'https://accounts.spotify.com/api/token', { 'Content-Type': 'application/x-www-form-urlencoded' },
+      form({ grant_type: 'authorization_code', code: q.code, redirect_uri: REDIR, client_id: CID, code_verifier: pk.v }));
+    wr(LSP, null);
+    const d = js(r.text);
+    busy = '';
+    if (r.status !== 200 || !d || !d.access_token) { err = r.status === 0 ? 'net' : 'auth'; changed(); return; }
+    tok = { at: d.access_token, rt: d.refresh_token, exp: Date.now() + (d.expires_in || 3600) * 1000 };
+    wr(LS, tok); err = '';
+    await loadAll(); startPoll();
+    SAVE.set.track = 'spotify'; persist();
+    SFX.musicStart(); if (typeof applyMusicContext === 'function') applyMusicContext();
+    if (typeof UI !== 'undefined' && UI.note) UI.note('Spotify подключён', tok.name ? 'Аккаунт: ' + tok.name : 'Выбери плейлист в настройках', 'music');
+    changed();
+  };
+
+  async function refresh() {
+    if (!tok || !tok.rt) return false;
+    if (refreshing) return refreshing;
+    refreshing = (async () => {
+      const r = await http('POST', 'https://accounts.spotify.com/api/token', { 'Content-Type': 'application/x-www-form-urlencoded' }, form({ grant_type: 'refresh_token', refresh_token: tok.rt, client_id: CID }));
+      const d = js(r.text);
+      if (r.status === 200 && d && d.access_token) {
+        tok.at = d.access_token; tok.exp = Date.now() + (d.expires_in || 3600) * 1000; if (d.refresh_token) tok.rt = d.refresh_token;
+        wr(LS, tok); return true;
+      }
+      if (r.status === 400 || r.status === 401) { tok = null; wr(LS, null); lists = null; now = null; err = 'expired'; changed(); }
+      return false;
+    })();
+    try { return await refreshing; } finally { refreshing = null; }
+  }
+  async function api(method, path, body) {
+    if (!tok) return { status: 401 };
+    if (Date.now() > tok.exp - 60000) await refresh();
+    if (!tok) return { status: 401 };
+    const go = () => http(method, API + path, Object.assign({ Authorization: 'Bearer ' + tok.at }, body !== undefined ? { 'Content-Type': 'application/json' } : {}), body !== undefined ? JSON.stringify(body) : (method === 'GET' ? null : ''));
+    let r = await go();
+    if (r.status === 401 && await refresh()) r = await go();
+    return { status: r.status, data: js(r.text) };
+  }
+
+  async function loadAll() {
+    const me = await api('GET', '/me');
+    if (me.status === 403) { err = 'not-allowed'; changed(); return; }
+    if (me.data && me.data.id) { tok.name = me.data.display_name || me.data.id; tok.uid = me.data.id; wr(LS, tok); }
+    const pl = await api('GET', '/me/playlists?limit=50');
+    if (pl.data && pl.data.items) {
+      lists = pl.data.items.filter(Boolean).map((p) => ({ name: p.name || 'Плейлист', uri: p.uri, n: ((p.items || p.tracks) || {}).total }));
+    } else if (!lists) lists = [];
+    await poll();
+    changed();
+  }
+
+  /* ---- playback ---- */
+  async function device() {
+    const r = await api('GET', '/me/player/devices');
+    const ds = (r.data && r.data.devices) || [];
+    return ds.find((d) => d.is_active) || ds.find((d) => d.type === 'Smartphone') || ds[0] || null;
+  }
+  function wake(ctx) {
+    pend = ctx; pendTries = 0;
+    let opened = false;
+    if (bridge('openSpotify')) try { opened = window.IskraApp.openSpotify(ctx && ctx.uri ? ctx.uri : ''); } catch (e) { /* ignore */ }
+    err = opened ? 'wake' : 'no-device'; changed();
+  }
+  async function play(ctx) { // ctx: { uri } or null (= carry on)
+    if (!tok) return;
+    busy = 'play'; err = ''; changed();
+    const dev = await device();
+    if (!dev) { busy = ''; wake(ctx); return; }
+    const body = ctx && ctx.uri ? { context_uri: ctx.uri } : undefined;
+    let r = await api('PUT', '/me/player/play?device_id=' + encodeURIComponent(dev.id), body);
+    if (r.status === 404) { busy = ''; wake(ctx); return; }
+    busy = '';
+    if (r.status === 403) err = 'premium';
+    else if (r.status >= 400 || r.status === 0) err = r.status === 0 ? 'net' : 'play';
+    else { pend = null; if (ctx && ctx.uri) SAVE.set.spLast = ctx.uri; SAVE.set.track = 'spotify'; persist(); }
+    changed();
+    setTimeout(poll, 900);
+  }
+  async function cmd(method, path) {
+    if (!tok) return;
+    const r = await api(method, path);
+    if (r.status === 404) { wake(null); return; }
+    if (r.status === 403) { err = 'premium'; changed(); }
+    setTimeout(poll, 600);
+  }
+  async function poll() {
+    if (!tok) return;
+    const r = await api('GET', '/me/player');
+    if (r.status === 0 || r.status >= 500 || r.status === 429) return; // keep what we showed
+    const was = JSON.stringify(now);
+    if (r.status === 204 || !r.data) now = null;
+    else {
+      const it = r.data.item;
+      now = { playing: !!r.data.is_playing, shuffle: !!r.data.shuffle_state, name: it ? it.name : '', by: it && it.artists ? it.artists.map((a) => a.name).join(', ') : '', ctx: r.data.context ? r.data.context.uri : '' };
+    }
+    if (JSON.stringify(now) !== was) changed();
+  }
+  function startPoll() {
+    clearInterval(pollT);
+    if (!tok) return;
+    pollT = setInterval(() => {
+      if (document.hidden || !active()) return;
+      const fast = typeof UI !== 'undefined' && UI.cur === 'settings';
+      if (fast || Date.now() % 20000 < 5000) poll();
+    }, 5000);
+  }
+  // back from the Spotify app: start what the player picked
+  window.__appResume = () => {
+    if (!tok) return;
+    if (pend !== null || err === 'wake' || err === 'no-device') {
+      const ctx = pend; const tryIt = () => { pendTries++; play(ctx).then(() => { if (err === 'wake' && pendTries < 3) setTimeout(tryIt, 1500); }); };
+      setTimeout(tryIt, 700);
+    } else poll();
+  };
+
+  function logout() {
+    tok = null; lists = null; now = null; err = ''; pend = null; wr(LS, null);
+    if (SAVE.set.track === 'spotify') { SAVE.set.track = 'auto'; persist(); }
+    clearInterval(pollT); SFX.musicStart(); changed();
+  }
+  function active() { return SAVE.set.track === 'spotify' && !!tok; }
+
+  function init() {
+    if (tok) { loadAll(); startPoll(); }
+    if (bridge('takeAuth')) setTimeout(() => window.__spotifyAuth(), 300); // the app may have been started by the login redirect
+  }
+  const ERR = {
+    web: 'Spotify подключается в приложении ИСКРА на Android',
+    'old-app': 'Для Spotify нужно новое приложение — скачай APK 2.8',
+    open: 'Не получилось открыть браузер',
+    denied: 'Вход отменён',
+    auth: 'Не получилось войти — попробуй ещё раз',
+    net: 'Нет связи со Spotify',
+    expired: 'Вход устарел — подключи Spotify заново',
+    premium: 'Spotify не даёт управлять: нужен Premium',
+    'not-allowed': 'Этот аккаунт не добавлен в приложение ISKRA на developer.spotify.com',
+    wake: 'Открыл Spotify — вернись в игру, музыка включится',
+    'no-device': 'Открой приложение Spotify на телефоне и вернись',
+    play: 'Spotify не смог включить — попробуй ещё раз',
+  };
+
+  return {
+    init, login, logout, play, poll, active, startPoll,
+    resume: () => play(SAVE.set.spLast && (!now || !now.ctx) ? { uri: SAVE.set.spLast } : null),
+    toggle: () => (now && now.playing ? cmd('PUT', '/me/player/pause') : play(null)),
+    next: () => cmd('POST', '/me/player/next'),
+    prev: () => cmd('POST', '/me/player/previous'),
+    shuffle: () => cmd('PUT', '/me/player/shuffle?state=' + (now && now.shuffle ? 'false' : 'true')),
+    get on() { return !!tok; },
+    get user() { return tok ? tok.name || '' : ''; },
+    get uid() { return tok ? tok.uid || '' : ''; },
+    get lists() { return lists; },
+    get now() { return now; },
+    get busy() { return busy; },
+    get err() { return err ? ERR[err] || '' : ''; },
+    canLogin, onChange(fn) { onChange = fn; },
+    _t: { challenge, sha256js },
   };
 })();
 
@@ -7434,6 +7697,7 @@ function cardHtml(info) {
     (info.badge ? `<span class="badge">${info.badge}</span>` : '');
 }
 function trackLabel() {
+  if (SPOT.active()) { const n = SPOT.now; return `${icon('music')}${n && n.name ? escapeHtml(n.name + (n.by ? ' — ' + n.by : '')) : 'Spotify'} · <u>дальше</u>`; }
   if (MYMUS.active()) return `${icon('music')}${escapeHtml(MYMUS.current() || 'Мои треки')} · <u>дальше</u>`;
   const tr = TRACKS_UI.find((q) => q.id === SFX.track);
   return tr ? `${icon('music')}${tr.name} · ${tr.style}` : '';
@@ -7782,6 +8046,53 @@ function renderSettings() {
     box.appendChild(el('div', 'my-note', MYMUS.saveOk ? 'Треки хранятся только на этом устройстве и не уходят в интернет.' : 'Этот браузер не даёт сохранить файлы — треки пропадут после перезапуска.'));
     L.appendChild(box);
   }
+  // Spotify: the player's account plays in the Spotify app
+  {
+    const sOn = SPOT.active(), n = SPOT.now;
+    const sub = !SPOT.on ? (SPOT.busy ? 'вхожу…' : SPOT.canLogin() ? 'подключи аккаунт (нужен Premium)' : APP ? 'нужно новое приложение — APK 2.8' : 'работает в приложении на Android')
+      : sOn ? (n && n.name ? (n.playing ? 'сейчас: ' : 'пауза: ') + escapeHtml(n.name + (n.by ? ' — ' + n.by : '')) : 'включено · выбери плейлист') : escapeHtml(SPOT.user || 'подключён') + ' · нажми, чтобы включить';
+    const sb = el('div', 'trk spot' + (sOn ? ' on' : ''), `${icon('music')}<div><b>Spotify</b><span>${sub}</span></div>`);
+    sb.setAttribute('role', 'button');
+    sb.onclick = () => {
+      SFX.init(); SFX.play('tab');
+      if (!SPOT.on) { SPOT.login(); renderSettingsKeep(); return; }
+      SAVE.set.track = 'spotify'; persist(); SFX.musicStart(); applyMusicContext();
+      if (!SPOT.now || !SPOT.now.playing) SPOT.resume();
+      renderSettingsKeep();
+    };
+    L.appendChild(sb);
+    const em = SPOT.err;
+    if (em) L.appendChild(el('div', 'sp-err', escapeHtml(em)));
+    if (SPOT.on) {
+      const box = el('div', 'my-list sp-list');
+      const ctl = el('div', 'sp-ctl');
+      const cb = (txt, fn, cls) => { const b = el('button', 'btn ghost' + (cls ? ' ' + cls : ''), txt); b.onclick = () => { SFX.init(); SFX.play('tab'); fn(); }; ctl.appendChild(b); };
+      cb('◀◀', () => SPOT.prev());
+      cb(n && n.playing ? '❚❚' : '▶', () => { SAVE.set.track = 'spotify'; persist(); SFX.musicStart(); applyMusicContext(); SPOT.toggle(); }, 'sp-main');
+      cb('▶▶', () => SPOT.next());
+      cb('⤮', () => SPOT.shuffle(), n && n.shuffle ? 'sp-act' : '');
+      box.appendChild(ctl);
+      const pls = [{ name: 'Любимые треки', uri: SPOT.uid ? 'spotify:user:' + SPOT.uid + ':collection' : '', n: null, fav: true }].concat(SPOT.lists || []);
+      for (const p of pls) {
+        if (!p.uri) continue;
+        const cur = n && n.ctx && (n.ctx === p.uri || (p.fav && /:collection$/.test(n.ctx)));
+        const row = el('div', 'my-row' + (cur && sOn ? ' cur' : ''));
+        const nm = el('button', 'my-nm', `${icon(p.fav ? 'heal' : 'music')}<span>${escapeHtml(p.name)}</span><small>${p.n ? p.n + ' тр.' : ''}</small>`);
+        nm.onclick = () => { SFX.init(); SFX.play('tab'); SAVE.set.track = 'spotify'; persist(); SFX.musicStart(); applyMusicContext(); SPOT.play({ uri: p.uri }); };
+        row.appendChild(nm); box.appendChild(row);
+      }
+      if (SPOT.lists === null) box.appendChild(el('div', 'my-note', 'Загружаю плейлисты…'));
+      else if (!SPOT.lists.length) box.appendChild(el('div', 'my-note', 'Плейлистов не нашлось — играют «Любимые треки»'));
+      const acts = el('div', 'my-acts');
+      const up = el('button', 'btn ghost', 'ОБНОВИТЬ'); up.onclick = () => { SFX.play('tab'); SPOT.init(); };
+      const out = el('button', 'btn ghost', 'ОТКЛЮЧИТЬ');
+      let armed = false;
+      out.onclick = () => { if (!armed) { armed = true; out.textContent = 'ТОЧНО?'; SFX.play('deny'); return; } SFX.play('click'); SPOT.logout(); applyMusicContext(); renderSettingsKeep(); };
+      acts.appendChild(up); acts.appendChild(out); box.appendChild(acts);
+      box.appendChild(el('div', 'my-note', 'Музыка играет в приложении Spotify, звуки игры — поверх. Громкость Spotify — кнопками телефона.'));
+      L.appendChild(box);
+    }
+  }
   L.appendChild(el('div', 'lbl', 'ПРОЧЕЕ'));
   tog('Вибрация', 'vib');
   tog('Цифры урона', 'nums');
@@ -8079,7 +8390,11 @@ function initUI() {
   on('qBack', () => { SFX.play('click'); toMenu(); });
   on('codexBtn', () => { SFX.play('click'); openCodex(); });
   on('cxBack', () => { SFX.play('click'); openProfile(); });
-  E.np.addEventListener('click', () => { if (MYMUS.active()) { SFX.init(); MYMUS.next(); SFX.play('tab'); } });
+  E.np.addEventListener('click', () => { if (SPOT.active()) { SFX.play('tab'); SPOT.next(); return; } if (MYMUS.active()) { SFX.init(); MYMUS.next(); SFX.play('tab'); } });
+  SPOT.onChange(() => {
+    if (E.np) E.np.innerHTML = trackLabel();
+    if (UI.cur === 'settings') renderSettingsKeep();
+  });
   MYMUS.onChange(() => {
     if (E.np) E.np.innerHTML = trackLabel();
     if (UI.cur === 'settings') renderSettingsKeep();
@@ -9417,6 +9732,7 @@ window.__appUpdate = (v) => {
 };
 // short «what's new» for small updates: shown once per version
 const PATCH_NOTES = {
+  '2.8': ['Spotify в игре: подключи свой аккаунт в «Настройки → Музыка» и выбирай плейлисты прямо из игры', 'Музыка играет в приложении Spotify, звуки игры — поверх. Кнопки: назад, пауза, дальше, перемешать', 'Нужен Spotify Premium и новое приложение (APK 2.8) — поставить один раз, дальше всё обновляется само'],
   '2.7': ['Музыка теперь «запекается» в готовую запись и играет как файл — не рвётся даже в самой жёсткой мясорубке', 'Каждый трек записывается один раз и хранится на телефоне (около 2 МБ)', 'В бою и с боссом музыка плавно перетекает в более мощную версию'],
   '2.6.3': ['Звук больше не рвётся: музыка планируется с запасом, а звуковой движок стал легче', 'Свечения и частицы рисуются в разы дешевле — меньше лагов в толпе', 'Ровные 60 FPS на экранах 120 Гц (120 можно включить в настройках)'],
 };
@@ -9633,6 +9949,7 @@ function boot() {
   requestAnimationFrame(frame);
   setTimeout(cloudInit, 0);
   MYMUS.load();
+  SPOT.init();
   if (APP && window.IskraApp.ok) try { window.IskraApp.ok(); } catch (e) { /* older app */ }
 }
 window.__iskra = {
