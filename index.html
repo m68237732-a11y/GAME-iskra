@@ -365,6 +365,7 @@ h2.ttl{font-family:var(--ff);font-weight:900;font-size:24px;letter-spacing:.08em
 .sp-ctl .sp-main{flex:1.4;color:#1ed760}
 .sp-ctl .sp-act{color:#1ed760;border-color:rgba(30,215,96,.5)}
 .sp-err{font-size:11px;color:#ffb36b;text-align:center;padding:0 6px 2px}
+.sp-err small{display:block;font-size:9.5px;color:var(--dim);margin-top:2px;word-break:break-word}
 .my-list{display:flex;flex-direction:column;gap:6px;margin:-2px 0 4px;padding:8px;border-radius:12px;background:rgba(255,211,77,.04);border:1px dashed rgba(255,211,77,.25)}
 .my-row{display:flex;align-items:center;gap:6px}
 .my-nm{flex:1;min-width:0;display:flex;align-items:center;gap:9px;padding:9px 10px;border-radius:10px;background:rgba(255,255,255,.03);border:1px solid rgba(255,255,255,.06);text-align:left}
@@ -2740,7 +2741,7 @@ const SPOT = (() => {
   const rd = (k) => { try { return JSON.parse(localStorage.getItem(k) || 'null'); } catch (e) { return null; } };
   const wr = (k, v) => { try { if (v == null) localStorage.removeItem(k); else localStorage.setItem(k, JSON.stringify(v)); } catch (e) { /* storage off */ } };
   let tok = rd(LS); // { at, rt, exp, name, uid }
-  let lists = null, now = null, err = '', busy = '', onChange = null, pend = null, pendTries = 0, pollT = 0, native = false, refreshing = null;
+  let lists = null, now = null, err = '', why = '', busy = '', onChange = null, pend = null, pendTries = 0, pollT = 0, native = false, refreshing = null;
   const changed = () => { if (onChange) try { onChange(); } catch (e) { /* ui gone */ } };
   const bridge = (n) => APP && window.IskraApp && typeof window.IskraApp[n] === 'function';
   const canLogin = () => bridge('openUrl');
@@ -2870,7 +2871,7 @@ const SPOT = (() => {
     const pl = await api('GET', '/me/playlists?limit=50');
     if (pl.data && pl.data.items) {
       lists = pl.data.items.filter(Boolean).map((p) => ({ name: p.name || 'Плейлист', uri: p.uri, n: ((p.items || p.tracks) || {}).total }));
-    } else if (!lists) lists = [];
+    } else { if (!lists) lists = []; if (pl.status >= 400) { refused(pl, 'cmd'); } }
     await poll();
     changed();
   }
@@ -2893,11 +2894,16 @@ const SPOT = (() => {
     const dev = await device();
     if (!dev) { busy = ''; wake(ctx); return; }
     const body = ctx && ctx.uri ? { context_uri: ctx.uri } : undefined;
-    let r = await api('PUT', '/me/player/play?device_id=' + encodeURIComponent(dev.id), body);
+    const path = '/me/player/play?device_id=' + encodeURIComponent(dev.id);
+    let r = await api('PUT', path, body);
     if (r.status === 404) { busy = ''; wake(ctx); return; }
+    if (r.status >= 400 && ctx && /:collection$/.test(ctx.uri || '')) { // liked songs as a context is refused on some accounts: send the tracks themselves
+      const lk = await api('GET', '/me/tracks?limit=50');
+      const uris = ((lk.data && lk.data.items) || []).map((x) => x && x.track && x.track.uri).filter(Boolean);
+      if (uris.length) { for (let i = uris.length - 1; i > 0; i--) { const j = Math.random() * (i + 1) | 0; [uris[i], uris[j]] = [uris[j], uris[i]]; } r = await api('PUT', path, { uris }); }
+    }
     busy = '';
-    if (r.status === 403) err = 'premium';
-    else if (r.status >= 400 || r.status === 0) err = r.status === 0 ? 'net' : 'play';
+    if (r.status >= 400 || r.status === 0) refused(r, 'play');
     else { pend = null; if (ctx && ctx.uri) SAVE.set.spLast = ctx.uri; SAVE.set.track = 'spotify'; persist(); }
     changed();
     setTimeout(poll, 900);
@@ -2906,8 +2912,20 @@ const SPOT = (() => {
     if (!tok) return;
     const r = await api(method, path);
     if (r.status === 404) { wake(null); return; }
-    if (r.status === 403) { err = 'premium'; changed(); }
+    if (r.status >= 400) refused(r, 'cmd'); else if (err) { err = ''; why = ''; changed(); }
     setTimeout(poll, 600);
+  }
+  // 403 is not always about Premium: Spotify also refuses e.g. "back" on the first track or shuffle in some lists
+  function refused(r, what) {
+    const e = (r.data && r.data.error) || {};
+    why = (e.reason || '') + (e.message ? ' · ' + e.message : '') + ' [' + r.status + ']';
+    if (r.status === 0) err = 'net';
+    else if (e.reason === 'PREMIUM_REQUIRED') err = 'premium';
+    else if (r.status === 403 && /premium/i.test(e.message || '')) err = 'premium';
+    else if (r.status === 403) err = 'restrict';
+    else if (r.status === 429) err = 'rate';
+    else err = what === 'play' ? 'play' : 'cmd';
+    changed();
   }
   async function poll() {
     if (!tok) return;
@@ -2963,6 +2981,9 @@ const SPOT = (() => {
     wake: 'Открыл Spotify — вернись в игру, музыка включится',
     'no-device': 'Открой приложение Spotify на телефоне и вернись',
     play: 'Spotify не смог включить — попробуй ещё раз',
+    cmd: 'Spotify не выполнил команду — попробуй ещё раз',
+    restrict: 'Spotify не разрешил это сейчас (например, «назад» на первом треке)',
+    rate: 'Слишком часто — подожди пару секунд',
   };
 
   return {
@@ -2979,6 +3000,7 @@ const SPOT = (() => {
     get now() { return now; },
     get busy() { return busy; },
     get err() { return err ? ERR[err] || '' : ''; },
+    get why() { return err ? why : ''; },
     canLogin, onChange(fn) { onChange = fn; },
     _t: { challenge, sha256js },
   };
@@ -8062,7 +8084,8 @@ function renderSettings() {
     };
     L.appendChild(sb);
     const em = SPOT.err;
-    if (em) L.appendChild(el('div', 'sp-err', escapeHtml(em)));
+    if (em) L.appendChild(el('div', 'sp-err', escapeHtml(em) + (SPOT.why ? '<small>' + escapeHtml(SPOT.why) + '</small>' : '')));
+    if (SPOT.on && SPOT.user) L.appendChild(el('div', 'my-note', 'Аккаунт Spotify: ' + escapeHtml(SPOT.user)));
     if (SPOT.on) {
       const box = el('div', 'my-list sp-list');
       const ctl = el('div', 'sp-ctl');
