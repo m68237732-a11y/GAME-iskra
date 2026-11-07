@@ -929,7 +929,7 @@ function fmtNum(n) { n = Math.round(n); if (n >= 1e6) return (n / 1e6).toFixed(1
 function vib(p) { if (!SAVE.set.vib) return; try { if (navigator.vibrate) navigator.vibrate(p); } catch (e) { /* ignore */ } }
 
 /* ================= save ================= */
-const GAME_VER = '2.6.2';
+const GAME_VER = '2.6.3';
 const SAVE_KEY = 'iskra.save.v1';
 const APP = typeof window.IskraApp !== 'undefined'; // running inside the Android app
 const FRZ = { st: '', dirty: false }; // frozen-world redraw state (see frame())
@@ -1908,7 +1908,7 @@ const SFX = (() => {
     try {
       const AC = window.AudioContext || window.webkitAudioContext;
       if (!AC) return;
-      ac = new AC();
+      try { ac = new AC({ latencyHint: 'playback' }); } catch (e) { ac = new AC(); }
       // music has its own leveller so it can be loud without pumping; everything then meets a gentle glue
       // compressor and a brick-wall limiter, so even 100% on both sliders never clips or distorts
       const mcomp = ac.createDynamicsCompressor();
@@ -1928,7 +1928,7 @@ const SFX = (() => {
         const revIn = Gn(), hp = ac.createBiquadFilter(), rev = ac.createConvolver(), revOut = Gn(0.9);
         revIn.channelCount = 1; revIn.channelCountMode = 'explicit';
         hp.type = 'highpass'; hp.frequency.value = 220;
-        rev.buffer = makeIR(2.4);
+        rev.buffer = makeIR(1.5);
         revIn.connect(hp); hp.connect(rev); rev.connect(revOut); revOut.connect(musTrim);
         const delIn = Gn(), dlp = ac.createBiquadFilter(), dL = ac.createDelay(2), dR = ac.createDelay(2), fbL = Gn(0.36), fbR = Gn(0.36), mer = ac.createChannelMerger(2), delOut = Gn(0.7), dRev = Gn(0.25);
         delIn.channelCount = 1; delIn.channelCountMode = 'explicit';
@@ -1942,7 +1942,8 @@ const SFX = (() => {
           const bus = Gn(); bus.connect(dk ? duckG : musTrim);
           if (rv) { const sn = Gn(rv); bus.connect(sn); sn.connect(revIn); }
           if (dl) { const sn = Gn(dl); bus.connect(sn); sn.connect(delIn); }
-          RB[k] = bus;
+          const side = (p) => { const g = Gn(), pn = ac.createStereoPanner(); pn.pan.value = p; g.connect(pn); pn.connect(bus); return g; };
+          RB[k] = { c: bus, l: side(-0.45), r: side(0.45) };
         }
       } catch (e) { RB = null; duckG = null; delayNodes = null; }
       musLvl = ac.createGain(); // the slider lives after the leveller, so 50% really sounds half as loud
@@ -1986,7 +1987,12 @@ const SFX = (() => {
     if (lastT[key] !== undefined && t - lastT[key] < gap) return false;
     lastT[key] = t; return true;
   }
+  // a ceiling on sounds playing at once: a weak phone's audio thread would rather drop a spark than stutter
+  let voices = 0;
+  const room = (o) => voices < ((o.bus && o.bus !== sfxBus) ? 120 : 70);
+  const track1 = (n) => { voices++; n.onended = () => { voices--; }; };
   function tone(o) {
+    if (!room(o)) return;
     const t = o.at || ac.currentTime;
     const osc = ac.createOscillator(), g = ac.createGain();
     osc.type = o.type || 'sine';
@@ -2011,9 +2017,10 @@ const SFX = (() => {
     let out = g;
     if (o.pan && ac.createStereoPanner) { const pn = ac.createStereoPanner(); pn.pan.value = o.pan; g.connect(pn); out = pn; }
     out.connect(o.bus || sfxBus);
-    osc.start(t); osc.stop(t + a + d + 0.05);
+    osc.start(t); osc.stop(t + a + d + 0.05); track1(osc);
   }
   function noise(o) {
+    if (!room(o)) return;
     const t = o.at || ac.currentTime;
     const src = ac.createBufferSource(); src.buffer = noiseBuf; src.loop = true;
     const f = ac.createBiquadFilter(); f.type = o.ft || 'lowpass';
@@ -2029,7 +2036,7 @@ const SFX = (() => {
     let out = g;
     if (o.pan && ac.createStereoPanner) { const pn = ac.createStereoPanner(); pn.pan.value = o.pan; g.connect(pn); out = pn; }
     out.connect(o.bus || sfxBus);
-    src.start(t, Math.random() * 0.5); src.stop(t + a + d + 0.05);
+    src.start(t, Math.random() * 0.5); src.stop(t + a + d + 0.05); track1(src);
   }
   const semi = (base, n) => base * Math.pow(2, n / 12);
 
@@ -2167,8 +2174,9 @@ const SFX = (() => {
   /* ---------- music: instruments ---------- */
   const mtof = (m) => 440 * Math.pow(2, (m - 69) / 12);
   // every music voice belongs to a role: the role decides its reverb/delay sends and whether the kick pumps it
-  const M = (o) => { o.bus = (RB && RB[o.role || 'lead']) || musTrim; tone(o); };
-  const MN = (o) => { o.bus = (RB && RB[o.role || 'drum']) || musTrim; noise(o); };
+  const route = (o, def) => { const b = RB && RB[o.role || def]; o.bus = !b ? musTrim : o.pan > 0.1 ? b.r : o.pan < -0.1 ? b.l : b.c; o.pan = 0; };
+  const M = (o) => { route(o, 'lead'); tone(o); };
+  const MN = (o) => { route(o, 'drum'); noise(o); };
   function duck(t, amt, rel) {
     if (!duckG) return;
     const g = duckG.gain;
@@ -2414,7 +2422,7 @@ const SFX = (() => {
     const tr = TR[track] || TR.spark, bpm = (boss && tr.bossBpm) || tr.bpm, d16 = 60 / bpm / 4;
     if (bpm !== lastBpm && delayNodes) { lastBpm = bpm; for (const dn of delayNodes) dn.delayTime.setTargetAtTime(Math.min(1.9, d16 * 3), ac.currentTime, 0.05); }
     if (nextT < ac.currentTime) nextT = ac.currentTime + 0.03;
-    while (nextT < ac.currentTime + 0.14) { try { tr.fn(step, nextT, d16, intensity, boss); } catch (e) { /* ignore */ } nextT += d16; step++; }
+    while (nextT < ac.currentTime + 0.32) { try { tr.fn(step, nextT, d16, intensity, boss); } catch (e) { /* ignore */ } nextT += d16; step++; }
   }
 
   return {
@@ -2426,7 +2434,7 @@ const SFX = (() => {
       if (MYMUS.active()) { musicOn = false; clearInterval(timer); timer = null; MYMUS.play(); return; }
       MYMUS.pause();
       if (musicOn) return;
-      musicOn = true; nextT = ac.currentTime + 0.06; step = 0; clearInterval(timer); timer = setInterval(tick, 35);
+      musicOn = true; nextT = ac.currentTime + 0.06; step = 0; clearInterval(timer); timer = setInterval(tick, 50);
     },
     musicStop() { want = false; musicOn = false; clearInterval(timer); timer = null; MYMUS.pause(); },
     refreshMusic() { if (want) SFX.musicStart(); },
@@ -2642,6 +2650,18 @@ function resize() {
 
 /* ---------- glow sprites ---------- */
 const glowCache = [], haloCache = [];
+// small copies of every glow: shrinking a 64px sprite down to a few pixels is what costs the most per draw
+const MIP = [], MIPH = [];
+function mipOf(cache, big, ci, D) {
+  if (D > 40) return big(ci);
+  const m = D > 18 ? 1 : 0, row = cache[m] || (cache[m] = []);
+  let s = row[ci]; if (s) return s;
+  const n = m ? 32 : 16, src = big(ci);
+  s = mkCanvas(n, n); const g = s.getContext('2d'); g.imageSmoothingQuality = 'high'; g.drawImage(src, 0, 0, n, n);
+  return (row[ci] = s);
+}
+const glowFor = (ci, D) => mipOf(MIP, glowSprite, ci, D);
+const haloFor = (ci, D) => mipOf(MIPH, haloSprite, ci, D);
 function glowSprite(ci) {
   let s = glowCache[ci]; if (s) return s;
   const c = mkCanvas(64, 64), g = c.getContext('2d'), rgb = hexToRgb(PAL[ci]);
@@ -5640,12 +5660,12 @@ function drawBackground(t, camx, camy) {
 function glowAt(ci, X, Y, R, a) {
   if (a <= 0.01 || R <= 0.1) return;
   ctx.globalAlpha = a > 1 ? 1 : a;
-  ctx.drawImage(glowSprite(ci), X - R, Y - R, R * 2, R * 2);
+  ctx.drawImage(glowFor(ci, R * 2), X - R, Y - R, R * 2, R * 2);
 }
 function haloAt(ci, X, Y, R, a) {
   if (a <= 0.01 || R <= 0.1) return;
   ctx.globalAlpha = a > 1 ? 1 : a;
-  ctx.drawImage(haloSprite(ci), X - R, Y - R, R * 2, R * 2);
+  ctx.drawImage(haloFor(ci, R * 2), X - R, Y - R, R * 2, R * 2);
 }
 const onScreen = (X, Y, m) => X > -m && Y > -m && X < cv.width + m && Y < cv.height + m;
 
@@ -6199,11 +6219,10 @@ function drawParticles() {
   }
   for (let c = 0; c < glowBuckets.length; c++) {
     const b = glowBuckets[c]; if (!b || !b.length) continue;
-    const img = glowSprite(c);
     for (const i of b) {
       const X = sxw(px[i]), Y = syw(py[i]), k = pl[i] / pml[i], R = ps[i] * Z * (0.5 + k * 0.8);
       ctx.globalAlpha = k > 1 ? 1 : k;
-      ctx.drawImage(img, X - R, Y - R, R * 2, R * 2);
+      ctx.drawImage(glowFor(c, R * 2), X - R, Y - R, R * 2, R * 2);
     }
   }
   ctx.lineCap = 'round';
@@ -6448,14 +6467,14 @@ function renderMenu(dt) {
   for (let i = 0; i < pn; i++) {
     const k = pl[i] / pml[i], R = ps[i] * Z;
     ctx.globalAlpha = Math.min(1, k * 1.5) * 0.7;
-    ctx.drawImage(glowSprite(pc[i]), sxw(px[i]) - R, syw(py[i]) - R, R * 2, R * 2);
+    ctx.drawImage(glowFor(pc[i], R * 2), sxw(px[i]) - R, syw(py[i]) - R, R * 2, R * 2);
   }
   ctx.globalAlpha = 1; ctx.globalCompositeOperation = 'source-over';
 }
 
 /* ================= cosmetics: skins, trails, kill-fx previews ================= */
-function gAt(g, ci, X, Y, R, a) { if (a <= 0.01 || R <= 0.1) return; g.globalAlpha = a > 1 ? 1 : a; g.drawImage(glowSprite(ci), X - R, Y - R, R * 2, R * 2); }
-function hAt(g, ci, X, Y, R, a) { if (a <= 0.01 || R <= 0.1) return; g.globalAlpha = a > 1 ? 1 : a; g.drawImage(haloSprite(ci), X - R, Y - R, R * 2, R * 2); }
+function gAt(g, ci, X, Y, R, a) { if (a <= 0.01 || R <= 0.1) return; g.globalAlpha = a > 1 ? 1 : a; g.drawImage(glowFor(ci, R * 2), X - R, Y - R, R * 2, R * 2); }
+function hAt(g, ci, X, Y, R, a) { if (a <= 0.01 || R <= 0.1) return; g.globalAlpha = a > 1 ? 1 : a; g.drawImage(haloFor(ci, R * 2), X - R, Y - R, R * 2, R * 2); }
 function skinColor(id, col, t) {
   if (id === 'sk_rainbow') return RAINBOW[Math.floor(t * 5) % RAINBOW.length];
   if (id === 'sk_gold') return '#ffd34d';
@@ -9292,6 +9311,18 @@ window.__appUpdate = (v) => {
   renderUpdBtn();
   if (STATE === 'menu') UI.note('ОБНОВЛЕНИЕ ' + UPD.ver, 'скачано — нажми кнопку в меню', 'refresh');
 };
+// short «what's new» for small updates: shown once per version
+const PATCH_NOTES = {
+  '2.6.3': ['Звук больше не рвётся: музыка планируется с запасом, а звуковой движок стал легче', 'Свечения и частицы рисуются в разы дешевле — меньше лагов в толпе', 'Ровные 60 FPS на экранах 120 Гц (120 можно включить в настройках)'],
+};
+function showPatch(v) {
+  STATE = 'news';
+  document.querySelector('#scr-news .ttl').textContent = 'ОБНОВЛЕНИЕ ' + v;
+  E.newsList.innerHTML = PATCH_NOTES[v].map((t, i) => `<div class="ni" style="animation-delay:${0.1 + i * 0.08}s">${icon(i ? 'sparkle' : 'music')}<span>${t}</span></div>`).join('');
+  E.newsBonus.innerHTML = '';
+  SAVE.patchSeen = v; persist();
+  UI.show('news');
+}
 function showNews26() {
   STATE = 'news';
   const items = [
@@ -9458,7 +9489,7 @@ function update(dt, last) {
 function prewarm() {
   for (const k in ENEMIES) { const d = ENEMIES[k]; for (let v = 0; v < 3; v++) enemySprite(d.shape, d.col, d.r, v); }
   for (let v = 0; v < 2; v++) { enemySprite('node', '#ff8ab0', 15, v); for (let i = 0; i < DEV_N; i++) enemySprite('seg', BOSSES.devourer.col, lerp(21, 11, i / (DEV_N - 1)), v); }
-  for (let i = 0; i < PAL.length; i++) { glowSprite(i); haloSprite(i); }
+  for (let i = 0; i < PAL.length; i++) { glowSprite(i); haloSprite(i); glowFor(i, 10); glowFor(i, 30); }
   beamSprite('#ff2a6d'); beamSprite('#ff7aa6'); beamSprite(C.beam); RAINBOW.forEach(beamSprite);
 }
 function boot() {
@@ -9483,6 +9514,7 @@ function boot() {
   if (needsReg()) openReg(); // brand-new player: sign up first
   else if (firstV25) showNews25(bonus);
   else if (!SAVE.seen26) showNews26();
+  else if (PATCH_NOTES[GAME_VER] && SAVE.patchSeen !== GAME_VER) showPatch(GAME_VER);
   else if (APP && location.href.indexOf('android_asset') < 0 && SAVE.updSeen !== GAME_VER) { SAVE.updSeen = GAME_VER; persist(); setTimeout(() => UI.note('ОБНОВЛЕНО ДО ' + GAME_VER, 'пришло само, без переустановки', 'refresh'), 1500); }
   else if (firstV2 && !APP) showNews(bonus);
   else if (firstV21) showNews(bonus, true);
