@@ -929,7 +929,7 @@ function fmtNum(n) { n = Math.round(n); if (n >= 1e6) return (n / 1e6).toFixed(1
 function vib(p) { if (!SAVE.set.vib) return; try { if (navigator.vibrate) navigator.vibrate(p); } catch (e) { /* ignore */ } }
 
 /* ================= save ================= */
-const GAME_VER = '2.6.3';
+const GAME_VER = '2.7';
 const SAVE_KEY = 'iskra.save.v1';
 const APP = typeof window.IskraApp !== 'undefined'; // running inside the Android app
 const FRZ = { st: '', dirty: false }; // frozen-world redraw state (see frame())
@@ -1900,7 +1900,7 @@ const MUS_MAX = 1, MUS_MAKEUP = 2.0, SFX_MAX = 1.15;
 const SFX = (() => {
   let ac = null, sfxBus = null, musBus = null, musTrim = null, musMake = null, musLvl = null, outNode = null, noiseBuf = null, driveCurve = null;
   const lastT = {};
-  let RB = null, duckG = null, delayNodes = null;
+  let RB = null, duckG = null, delayNodes = null, baking = false;
   let want = false, musicOn = false, step = 0, nextT = 0, timer = null, intensity = 0, boss = false, musVol = 1, track = 'ambient';
 
   function init() {
@@ -1920,32 +1920,7 @@ const SFX = (() => {
       lim.threshold.value = -3; lim.knee.value = 0; lim.ratio.value = 20; lim.attack.value = 0.001; lim.release.value = 0.12;
       sfxBus = ac.createGain(); musBus = ac.createGain(); musTrim = ac.createGain(); musTrim.connect(musBus); musTrim.gain.value = (TR[track] && TR[track].vol) || 1;
       musMake = ac.createGain(); musMake.gain.value = MUS_MAKEUP;
-      // headphone-friendly space: every music voice goes to a role bus with its own reverb / ping-pong delay sends;
-      // pads, bass and arps sit behind a gain the kick pumps (the classic sidechain feel)
-      try {
-        const Gn = (v) => { const g = ac.createGain(); g.gain.value = v === undefined ? 1 : v; return g; };
-        duckG = Gn(); duckG.connect(musTrim);
-        const revIn = Gn(), hp = ac.createBiquadFilter(), rev = ac.createConvolver(), revOut = Gn(0.9);
-        revIn.channelCount = 1; revIn.channelCountMode = 'explicit';
-        hp.type = 'highpass'; hp.frequency.value = 220;
-        rev.buffer = makeIR(1.5);
-        revIn.connect(hp); hp.connect(rev); rev.connect(revOut); revOut.connect(musTrim);
-        const delIn = Gn(), dlp = ac.createBiquadFilter(), dL = ac.createDelay(2), dR = ac.createDelay(2), fbL = Gn(0.36), fbR = Gn(0.36), mer = ac.createChannelMerger(2), delOut = Gn(0.7), dRev = Gn(0.25);
-        delIn.channelCount = 1; delIn.channelCountMode = 'explicit';
-        dlp.type = 'lowpass'; dlp.frequency.value = 3800;
-        dL.delayTime.value = dR.delayTime.value = 0.38;
-        delIn.connect(dlp); dlp.connect(dL); dL.connect(mer, 0, 0); dL.connect(fbL); fbL.connect(dR); dR.connect(mer, 0, 1); dR.connect(fbR); fbR.connect(dL);
-        mer.connect(delOut); delOut.connect(musTrim); delOut.connect(dRev); dRev.connect(revIn);
-        delayNodes = [dL, dR];
-        RB = {};
-        for (const [k, dk, rv, dl] of [['kick', 0, 0.03, 0], ['drum', 0, 0.1, 0], ['snare', 0, 0.3, 0], ['bass', 1, 0, 0], ['pad', 1, 0.55, 0], ['arp', 1, 0.2, 0.3], ['lead', 0, 0.25, 0.28], ['bell', 0, 0.6, 0.22], ['fx', 0, 0.5, 0]]) {
-          const bus = Gn(); bus.connect(dk ? duckG : musTrim);
-          if (rv) { const sn = Gn(rv); bus.connect(sn); sn.connect(revIn); }
-          if (dl) { const sn = Gn(dl); bus.connect(sn); sn.connect(delIn); }
-          const side = (p) => { const g = Gn(), pn = ac.createStereoPanner(); pn.pan.value = p; g.connect(pn); pn.connect(bus); return g; };
-          RB[k] = { c: bus, l: side(-0.45), r: side(0.45) };
-        }
-      } catch (e) { RB = null; duckG = null; delayNodes = null; }
+      try { const gr = musicGraph(ac, musTrim); RB = gr.RB; duckG = gr.duckG; delayNodes = gr.delayNodes; } catch (e) { RB = null; duckG = null; delayNodes = null; }
       musLvl = ac.createGain(); // the slider lives after the leveller, so 50% really sounds half as loud
       musBus.connect(mcomp); mcomp.connect(musMake); musMake.connect(musLvl); musLvl.connect(comp);
       // last line of defence: a soft clipper rounds off anything the limiter lets through
@@ -1971,9 +1946,37 @@ const SFX = (() => {
     musLvl.gain.value = SAVE.set.music ? MUS_MAX * mv * mv * musVol : 0;
     MYMUS.volUpdate();
   }
+  // headphone-friendly space: every music voice goes to a role bus with its own reverb / ping-pong delay sends;
+  // pads, bass and arps sit behind a gain the kick pumps (the classic sidechain feel). Built per context:
+  // the live one and the offline one that «bakes» tracks into loops.
+  function musicGraph(cx, out) {
+    const Gn = (v) => { const g = cx.createGain(); g.gain.value = v === undefined ? 1 : v; return g; };
+    const dg = Gn(); dg.connect(out);
+    const revIn = Gn(), hp = cx.createBiquadFilter(), rev = cx.createConvolver(), revOut = Gn(0.9);
+    revIn.channelCount = 1; revIn.channelCountMode = 'explicit';
+    hp.type = 'highpass'; hp.frequency.value = 220;
+    rev.buffer = IR[cx.sampleRate] || (IR[cx.sampleRate] = makeIR(cx, 1.5)); // a convolver wants its own sample rate
+    revIn.connect(hp); hp.connect(rev); rev.connect(revOut); revOut.connect(out);
+    const delIn = Gn(), dlp = cx.createBiquadFilter(), dL = cx.createDelay(2), dR = cx.createDelay(2), fbL = Gn(0.36), fbR = Gn(0.36), mer = cx.createChannelMerger(2), delOut = Gn(0.7), dRev = Gn(0.25);
+    delIn.channelCount = 1; delIn.channelCountMode = 'explicit';
+    dlp.type = 'lowpass'; dlp.frequency.value = 3800;
+    dL.delayTime.value = dR.delayTime.value = 0.38;
+    delIn.connect(dlp); dlp.connect(dL); dL.connect(mer, 0, 0); dL.connect(fbL); fbL.connect(dR); dR.connect(mer, 0, 1); dR.connect(fbR); fbR.connect(dL);
+    mer.connect(delOut); delOut.connect(out); delOut.connect(dRev); dRev.connect(revIn);
+    const rb = {};
+    for (const [k, dk, rv, dl] of [['kick', 0, 0.03, 0], ['drum', 0, 0.1, 0], ['snare', 0, 0.3, 0], ['bass', 1, 0, 0], ['pad', 1, 0.55, 0], ['arp', 1, 0.2, 0.3], ['lead', 0, 0.25, 0.28], ['bell', 0, 0.6, 0.22], ['fx', 0, 0.5, 0]]) {
+      const bus = Gn(); bus.connect(dk ? dg : out);
+      if (rv) { const sn = Gn(rv); bus.connect(sn); sn.connect(revIn); }
+      if (dl) { const sn = Gn(dl); bus.connect(sn); sn.connect(delIn); }
+      const side = (p) => { const g = Gn(), pn = cx.createStereoPanner(); pn.pan.value = p; g.connect(pn); pn.connect(bus); return g; };
+      rb[k] = { c: bus, l: side(-0.45), r: side(0.45) };
+    }
+    return { RB: rb, duckG: dg, delayNodes: [dL, dR] };
+  }
+  const IR = {};
   // a synthetic hall: decaying stereo noise that darkens as it fades, plus a few early reflections
-  function makeIR(sec) {
-    const sr = ac.sampleRate, n = Math.floor(sr * sec), b = ac.createBuffer(2, n, sr);
+  function makeIR(cx, sec) {
+    const sr = cx.sampleRate, n = Math.floor(sr * sec), b = cx.createBuffer(2, n, sr);
     for (let c = 0; c < 2; c++) {
       const d = b.getChannelData(c); let lp = 0;
       for (let i = 0; i < n; i++) { const x = i / n; lp += (Math.random() * 2 - 1 - lp) * (0.7 - 0.62 * x); d[i] = lp * Math.pow(1 - x, 1.6) * Math.exp(-x * 3.2); }
@@ -1989,8 +1992,8 @@ const SFX = (() => {
   }
   // a ceiling on sounds playing at once: a weak phone's audio thread would rather drop a spark than stutter
   let voices = 0;
-  const room = (o) => voices < ((o.bus && o.bus !== sfxBus) ? 120 : 70);
-  const track1 = (n) => { voices++; n.onended = () => { voices--; }; };
+  const room = (o) => baking || voices < ((o.bus && o.bus !== sfxBus) ? 120 : 70);
+  const track1 = (n) => { if (baking) return; voices++; n.onended = () => { voices--; }; };
   function tone(o) {
     if (!room(o)) return;
     const t = o.at || ac.currentTime;
@@ -2416,9 +2419,109 @@ const SFX = (() => {
     nebula: { bpm: 100, fn: tNebula, vol: 1.19 }, hyper: { bpm: 138, bossBpm: 142, fn: tHyper, vol: 0.81 }, dark: { bpm: 108, bossBpm: 116, fn: tDark, vol: 0.94 },
     frost: { bpm: 130, fn: tFrost, vol: 0.68 }, inferno: { bpm: 145, bossBpm: 150, fn: tInferno, vol: 0.65 }, epic: { bpm: 88, bossBpm: 92, fn: tEpic, vol: 0.89 },
   };
+  /* ---------- baked music: each track is rendered once into seamless 8-bar loops (calm / battle / boss),
+     then simply played back — no synthesis while you fight, so a busy phone cannot make it stutter ---------- */
+  const BK = { track: '', bufs: {}, cache: {}, lru: [], queue: [], busy: false, src: null, gain: null, key: '', t0: 0, len: 0 };
+  const vkey = (I, B) => (B ? 'b' : I >= 3 ? 'i3' : I <= 0 ? 'i0' : 'i2');
+  const BAKE_SR = 32000; // plenty for game music, a third less work and memory
+  const bpmOf = (id, B) => (B && TR[id].bossBpm) || TR[id].bpm;
+  // baked loops are kept on the phone (16-bit, ~2 MB each), so a track is rendered only once, ever
+  const BAKE_V = 'm1';
+  let bdbP = null;
+  function bdb() {
+    if (!bdbP) bdbP = new Promise((res) => { try { const r = indexedDB.open('iskra-bake', 1); r.onupgradeneeded = () => r.result.createObjectStore('l'); r.onsuccess = () => res(r.result); r.onerror = () => res(null); } catch (e) { res(null); } });
+    return bdbP;
+  }
+  const bkey = (id, key) => BAKE_V + ':' + id + ':' + key;
+  function bakeLoad(id, key) {
+    return bdb().then((db) => (db ? new Promise((res) => { try { const q = db.transaction('l').objectStore('l').get(bkey(id, key)); q.onsuccess = () => res(q.result || null); q.onerror = () => res(null); } catch (e) { res(null); } }) : null));
+  }
+  function bakeSave(id, key, b) {
+    bdb().then((db) => {
+      if (!db) return;
+      const rec = { sr: b.sampleRate, ch: [] };
+      for (let c = 0; c < 2; c++) { const f = b.getChannelData(c), q = new Int16Array(f.length); for (let i = 0; i < f.length; i++) { const v = f[i]; q[i] = v >= 1 ? 32767 : v <= -1 ? -32767 : v * 32767; } rec.ch.push(q); }
+      try { db.transaction('l', 'readwrite').objectStore('l').put(rec, bkey(id, key)); } catch (e) { /* storage full: bake again next time */ }
+    });
+  }
+  function bakeNext() {
+    if (BK.busy || !BK.queue.length || !ac || typeof OfflineAudioContext === 'undefined') return;
+    const [id, key] = BK.queue.shift();
+    if (id !== BK.track || BK.bufs[key]) { bakeNext(); return; }
+    BK.busy = true;
+    bakeLoad(id, key).then((rec) => {
+      if (rec && rec.ch && rec.ch.length === 2) {
+        const b = ac.createBuffer(2, rec.ch[0].length, rec.sr);
+        for (let c = 0; c < 2; c++) { const q = rec.ch[c], f = b.getChannelData(c); for (let i = 0; i < q.length; i++) f[i] = q[i] / 32767; }
+        if (BK.cache[id]) BK.cache[id][key] = b;
+        BK.busy = false; setTimeout(bakeNext, 30);
+      } else renderLoop(id, key);
+    });
+  }
+  function renderLoop(id, key) {
+    const tr = TR[id], B = key === 'b', I = B ? 3 : +key[1], bpm = bpmOf(id, B), d16 = 60 / bpm / 4, steps = 128;
+    const len = steps * d16, tail = 2, sr = BAKE_SR, n = Math.ceil(len * sr);
+    let off;
+    try { off = new OfflineAudioContext(2, Math.ceil((len + tail) * sr), sr); } catch (e) { BK.busy = false; return; }
+    const save = [ac, RB, duckG, delayNodes, musTrim];
+    let ok = false;
+    try {
+      const out = off.createGain(); out.connect(off.destination);
+      const gr = musicGraph(off, out);
+      ac = off; RB = gr.RB; duckG = gr.duckG; delayNodes = gr.delayNodes; musTrim = out; baking = true;
+      for (const dn of gr.delayNodes) dn.delayTime.value = Math.min(1.9, d16 * 3);
+      for (let s = 0; s < steps; s++) tr.fn(steps + s, 0.02 + s * d16, d16, I, B); // start one loop in, so phrase-start accents land
+      ok = true;
+    } catch (e) { /* a failed bake just means live synthesis */ }
+    [ac, RB, duckG, delayNodes, musTrim] = save; baking = false;
+    off.startRendering().then((r) => {
+      const b = ac.createBuffer(2, n, sr);
+      for (let c = 0; c < 2; c++) { // fold the reverb tail back onto the start: a seamless loop
+        const src = r.getChannelData(c), dst = b.getChannelData(c);
+        dst.set(src.subarray(0, n));
+        const t = Math.min(src.length - n, n); for (let i = 0; i < t; i++) dst[i] += src[n + i];
+      }
+      if (ok && BK.cache[id]) BK.cache[id][key] = b;
+      if (ok) bakeSave(id, key, b);
+    }).catch(() => {}).finally(() => { BK.busy = false; setTimeout(bakeNext, 60); });
+  }
+  function wantBake(id) {
+    if (BK.track !== id) { // keep the loops of the last few tracks: going back to one is instant
+      BK.track = id; BK.bufs = BK.cache[id] || (BK.cache[id] = {}); BK.queue = [];
+      BK.lru = BK.lru.filter((t) => t !== id); BK.lru.push(id);
+      while (BK.lru.length > 3) delete BK.cache[BK.lru.shift()];
+    }
+    const first = vkey(intensity, boss), order = id === 'ambient' ? [first, 'i0', 'i2'] : [first, 'b', 'i3'];
+    BK.queue = order.filter((k, i) => order.indexOf(k) === i && !BK.bufs[k]).map((k) => [id, k]);
+    bakeNext();
+  }
+  function stopBaked(fade) {
+    if (!BK.src) return;
+    const t = ac.currentTime;
+    try { BK.gain.gain.cancelScheduledValues(t); BK.gain.gain.setTargetAtTime(0.0001, t, fade / 3); BK.src.stop(t + fade + 0.3); } catch (e) { /* stopped */ }
+    BK.src = null; BK.key = '';
+  }
+  function playBaked(key, buf) {
+    if (BK.key === BK.track + key) return;
+    const t = ac.currentTime, fade = BK.src ? 1.2 : 0.25;
+    const src = ac.createBufferSource(), g = ac.createGain();
+    src.buffer = buf; src.loop = true;
+    g.gain.setValueAtTime(0.0001, t); g.gain.exponentialRampToValueAtTime(1, t + fade);
+    src.connect(g); g.connect(musTrim);
+    // same tempo: keep the beat where it was
+    const sameBeat = BK.src && Math.abs(buf.duration - BK.len) < 0.01;
+    const offs = sameBeat ? (t - BK.t0) % buf.duration : 0;
+    stopBaked(fade);
+    src.start(t, offs);
+    BK.src = src; BK.gain = g; BK.key = BK.track + key; BK.t0 = t - offs; BK.len = buf.duration;
+  }
   let lastBpm = 0;
   function tick() {
     if (!live() || !musicOn) return;
+    if (BK.track !== track) { stopBaked(0.4); wantBake(track); }
+    const vk = vkey(intensity, boss), buf = BK.bufs[vk];
+    if (buf) { playBaked(vk, buf); return; }
+    if (BK.src) { if (!BK.busy && !BK.queue.length) wantBake(track); return; } // keep the old loop until the new one is ready
     const tr = TR[track] || TR.spark, bpm = (boss && tr.bossBpm) || tr.bpm, d16 = 60 / bpm / 4;
     if (bpm !== lastBpm && delayNodes) { lastBpm = bpm; for (const dn of delayNodes) dn.delayTime.setTargetAtTime(Math.min(1.9, d16 * 3), ac.currentTime, 0.05); }
     if (nextT < ac.currentTime) nextT = ac.currentTime + 0.03;
@@ -2431,13 +2534,14 @@ const SFX = (() => {
     musicStart() {
       want = true;
       if (!ac) return;
-      if (MYMUS.active()) { musicOn = false; clearInterval(timer); timer = null; MYMUS.play(); return; }
+      if (MYMUS.active()) { musicOn = false; clearInterval(timer); timer = null; stopBaked(0.3); MYMUS.play(); return; }
       MYMUS.pause();
       if (musicOn) return;
       musicOn = true; nextT = ac.currentTime + 0.06; step = 0; clearInterval(timer); timer = setInterval(tick, 50);
     },
-    musicStop() { want = false; musicOn = false; clearInterval(timer); timer = null; MYMUS.pause(); },
+    musicStop() { want = false; musicOn = false; clearInterval(timer); timer = null; if (ac) stopBaked(0.3); MYMUS.pause(); },
     refreshMusic() { if (want) SFX.musicStart(); },
+    _bk: () => ({ track: BK.track, keys: Object.keys(BK.bufs), playing: BK.key, busy: BK.busy, q: BK.queue.length }),
     ctx: () => ac, musicBus: () => musBus, musVol: () => musVol, wantsMusic: () => want,
     setMusic(i, b) { intensity = i; boss = !!b; },
     setTrack(id) { if (!TR[id] || id === track || MYMUS.active()) return; track = id; step = 0; if (musTrim) musTrim.gain.setTargetAtTime(TR[id].vol || 1, ac.currentTime, 0.08); },
@@ -9313,6 +9417,7 @@ window.__appUpdate = (v) => {
 };
 // short «what's new» for small updates: shown once per version
 const PATCH_NOTES = {
+  '2.7': ['Музыка теперь «запекается» в готовую запись и играет как файл — не рвётся даже в самой жёсткой мясорубке', 'Каждый трек записывается один раз и хранится на телефоне (около 2 МБ)', 'В бою и с боссом музыка плавно перетекает в более мощную версию'],
   '2.6.3': ['Звук больше не рвётся: музыка планируется с запасом, а звуковой движок стал легче', 'Свечения и частицы рисуются в разы дешевле — меньше лагов в толпе', 'Ровные 60 FPS на экранах 120 Гц (120 можно включить в настройках)'],
 };
 function showPatch(v) {
