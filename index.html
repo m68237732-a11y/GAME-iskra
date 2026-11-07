@@ -356,6 +356,16 @@ h2.ttl{font-family:var(--ff);font-weight:900;font-size:24px;letter-spacing:.08em
 .trk.on svg{color:#4df3ff}
 .trk.mine svg{color:#ffd34d}
 .trk.spot svg{color:#1ed760}
+.trk.ext svg{color:#ff4e45}
+.trk.ext.on{border-color:rgba(255,78,69,.6);background:rgba(255,78,69,.08)}
+.ext-list{background:rgba(255,78,69,.04);border-color:rgba(255,78,69,.28)}
+.ext-yt{color:#ff4e45;font-family:var(--ff);font-size:12px!important}
+.ext-help{font-size:11.5px;line-height:1.5;color:#c9d4ea;padding:2px 4px}
+.ext-help b{color:#ff8a84}
+.ext-add{display:flex;gap:6px}
+.ext-in{flex:1;min-width:0;padding:10px;border-radius:10px;background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.1);color:#e9f1ff;font-size:12.5px;outline:none}
+.ext-in:focus{border-color:rgba(255,78,69,.6)}
+.ext-add .btn{flex:none;padding:10px 12px;font-size:11px}
 .trk.spot.on{border-color:rgba(30,215,96,.6);background:rgba(30,215,96,.09)}
 .sp-list{background:rgba(30,215,96,.04);border-color:rgba(30,215,96,.28)}
 .sp-list .my-row.cur .my-nm{border-color:rgba(30,215,96,.6);background:rgba(30,215,96,.09)}
@@ -940,7 +950,7 @@ function fmtNum(n) { n = Math.round(n); if (n >= 1e6) return (n / 1e6).toFixed(1
 function vib(p) { if (!SAVE.set.vib) return; try { if (navigator.vibrate) navigator.vibrate(p); } catch (e) { /* ignore */ } }
 
 /* ================= save ================= */
-const GAME_VER = '2.8';
+const GAME_VER = '2.9';
 const SAVE_KEY = 'iskra.save.v1';
 const APP = typeof window.IskraApp !== 'undefined'; // running inside the Android app
 const FRZ = { st: '', dirty: false }; // frozen-world redraw state (see frame())
@@ -2545,7 +2555,7 @@ const SFX = (() => {
     musicStart() {
       want = true;
       if (!ac) return;
-      if (SPOT.active()) { musicOn = false; clearInterval(timer); timer = null; stopBaked(0.3); MYMUS.pause(); return; }
+      if (SPOT.active() || EXTM.active()) { musicOn = false; clearInterval(timer); timer = null; stopBaked(0.3); MYMUS.pause(); return; }
       if (MYMUS.active()) { musicOn = false; clearInterval(timer); timer = null; stopBaked(0.3); MYMUS.play(); return; }
       MYMUS.pause();
       if (musicOn) return;
@@ -2556,7 +2566,7 @@ const SFX = (() => {
     _bk: () => ({ track: BK.track, keys: Object.keys(BK.bufs), playing: BK.key, busy: BK.busy, q: BK.queue.length }),
     ctx: () => ac, musicBus: () => musBus, musVol: () => musVol, wantsMusic: () => want,
     setMusic(i, b) { intensity = i; boss = !!b; },
-    setTrack(id) { if (!TR[id] || id === track || MYMUS.active() || SPOT.active()) return; track = id; step = 0; if (musTrim) musTrim.gain.setTargetAtTime(TR[id].vol || 1, ac.currentTime, 0.08); },
+    setTrack(id) { if (!TR[id] || id === track || MYMUS.active() || SPOT.active() || EXTM.active()) return; track = id; step = 0; if (musTrim) musTrim.gain.setTargetAtTime(TR[id].vol || 1, ac.currentTime, 0.08); },
     get track() { return track; },
     duck(v) { musVol = v; applyVol(); },
     get on() { return !!ac; },
@@ -3003,6 +3013,78 @@ const SPOT = (() => {
     get why() { return err ? why : ''; },
     canLogin, onChange(fn) { onChange = fn; },
     _t: { challenge, sha256js },
+  };
+})();
+
+/* ================= any music app (YouTube Music and others): control what plays there through Android ================= */
+const EXTM = (() => {
+  let st = null, onChange = null, pollT = 0;
+  const has = (n) => APP && window.IskraApp && typeof window.IskraApp[n] === 'function';
+  const supported = () => has('mediaState');
+  const changed = () => { if (onChange) try { onChange(); } catch (e) { /* ui gone */ } };
+  function read() {
+    if (!supported()) return;
+    let s = null;
+    try { s = JSON.parse(window.IskraApp.mediaState()); } catch (e) { s = null; }
+    const was = JSON.stringify(st);
+    st = s;
+    if (JSON.stringify(st) !== was) changed();
+  }
+  function cmd(c) {
+    if (!supported()) return;
+    let ok = false;
+    try { ok = window.IskraApp.mediaCmd(c); } catch (e) { ok = false; }
+    if (!ok) { if (has('openMusicApp')) window.IskraApp.openMusicApp(''); }
+    setTimeout(read, 350); setTimeout(read, 1200);
+  }
+  function active() { return SAVE.set.track === 'ext' && supported(); }
+  function start() {
+    clearInterval(pollT);
+    if (!supported()) return;
+    read();
+    pollT = setInterval(() => {
+      if (document.hidden) return;
+      const inSet = typeof UI !== 'undefined' && UI.cur === 'settings';
+      if (active() || inSet) read();
+    }, 2000);
+  }
+  // saved playlist links
+  const lists = () => (Array.isArray(SAVE.set.ytl) ? SAVE.set.ytl : (SAVE.set.ytl = []));
+  function addLink(raw) {
+    const m = String(raw || '').match(/https?:\/\/[^\s]+/);
+    if (!m) return 'bad';
+    const url = m[0].replace(/[),.;]+$/, '');
+    if (!/(youtube\.com|youtu\.be)\//i.test(url)) return 'bad';
+    const L = lists();
+    if (L.some((q) => q.url === url)) return 'dup';
+    if (L.length >= 20) return 'full';
+    const isList = /[?&]list=/.test(url);
+    const given = String(raw).slice(0, String(raw).indexOf(m[0])).replace(/[\s:—–-]+$/, '').trim().slice(0, 40);
+    L.push({ url, name: given || (isList ? 'Плейлист ' : 'Трек ') + (L.length + 1) });
+    persist(); changed();
+    return 'ok';
+  }
+  function removeLink(url) { SAVE.set.ytl = lists().filter((q) => q.url !== url); persist(); changed(); }
+  function rename(url, name) { const q = lists().find((x) => x.url === url); if (q) { q.name = String(name || '').trim().slice(0, 40) || q.name; persist(); changed(); } }
+  function open(url) {
+    if (!has('openMusicApp')) return;
+    // music.youtube.com opens straight in YouTube Music; plain youtube links too when the app is there
+    let u = url || '';
+    if (u) u = u.replace(/^https?:\/\/(www\.|m\.)?youtube\.com\//i, 'https://music.youtube.com/');
+    window.IskraApp.openMusicApp(u);
+  }
+  const prevResume = window.__appResume;
+  window.__appResume = () => { try { if (prevResume) prevResume(); } catch (e) { /* ignore */ } setTimeout(read, 400); };
+  return {
+    supported, active, start, read, open, addLink, removeLink, rename,
+    toggle: () => cmd('toggle'), next: () => cmd('next'), prev: () => cmd('prev'), pause: () => cmd('pause'),
+    grant: () => { if (has('mediaGrant')) window.IskraApp.mediaGrant(); },
+    appInfo: () => { if (has('appInfo')) window.IskraApp.appInfo(); },
+    get st() { return st; },
+    get allowed() { return !!(st && st.allowed); },
+    get lists() { return lists(); },
+    label() { return st && st.title ? st.title + (st.artist ? ' — ' + st.artist : '') : ''; },
+    onChange(fn) { onChange = fn; },
   };
 })();
 
@@ -7719,6 +7801,7 @@ function cardHtml(info) {
     (info.badge ? `<span class="badge">${info.badge}</span>` : '');
 }
 function trackLabel() {
+  if (EXTM.active()) { const t = EXTM.label(); return `${icon('music')}${t ? escapeHtml(t) : escapeHtml((EXTM.st && EXTM.st.app) || 'Свой плеер')} · <u>дальше</u>`; }
   if (SPOT.active()) { const n = SPOT.now; return `${icon('music')}${n && n.name ? escapeHtml(n.name + (n.by ? ' — ' + n.by : '')) : 'Spotify'} · <u>дальше</u>`; }
   if (MYMUS.active()) return `${icon('music')}${escapeHtml(MYMUS.current() || 'Мои треки')} · <u>дальше</u>`;
   const tr = TRACKS_UI.find((q) => q.id === SFX.track);
@@ -8116,6 +8199,65 @@ function renderSettings() {
       L.appendChild(box);
     }
   }
+  // any other music app: YouTube Music and friends, controlled through Android
+  {
+    const sup = EXTM.supported(), ok = EXTM.allowed, st = EXTM.st || {}, xOn = EXTM.active();
+    const sub = !sup ? (APP ? 'нужно новое приложение — APK 2.9' : 'работает в приложении на Android')
+      : !ok ? 'нажми и дай доступ к уведомлениям'
+      : st.title ? (st.playing ? 'сейчас: ' : 'пауза: ') + escapeHtml(EXTM.label()) + ' · ' + escapeHtml(st.app || '')
+      : (xOn ? 'включено · ' : '') + 'включи музыку в YouTube Music';
+    const xb = el('div', 'trk ext' + (xOn ? ' on' : ''), `${icon('music')}<div><b>YouTube Music и другие</b><span>${sub}</span></div>`);
+    xb.setAttribute('role', 'button');
+    xb.onclick = () => {
+      SFX.init(); SFX.play('tab');
+      if (!sup) return;
+      if (!ok) { EXTM.grant(); return; }
+      SAVE.set.track = 'ext'; persist(); SFX.musicStart(); applyMusicContext();
+      if (!st.title) EXTM.open('');
+      renderSettingsKeep();
+    };
+    L.appendChild(xb);
+    if (sup && !ok) {
+      const box = el('div', 'my-list ext-list');
+      box.appendChild(el('div', 'ext-help', '<b>1.</b> Нажми «ДАТЬ ДОСТУП» и включи ИСКРА.<br><b>2.</b> Если переключатель серый или пишет «Ограниченная настройка»: нажми «О ПРИЛОЖЕНИИ» → <b>⋮</b> справа сверху → «Разрешить ограниченные настройки», потом снова шаг 1.<br>Игра видит только то, что играет, и кнопки плеера — уведомления не читаются.'));
+      const acts = el('div', 'my-acts');
+      const g = el('button', 'btn ghost', 'ДАТЬ ДОСТУП'); g.onclick = () => { SFX.play('tab'); EXTM.grant(); };
+      const ai = el('button', 'btn ghost', 'О ПРИЛОЖЕНИИ'); ai.onclick = () => { SFX.play('tab'); EXTM.appInfo(); };
+      acts.appendChild(g); acts.appendChild(ai); box.appendChild(acts);
+      L.appendChild(box);
+    }
+    if (sup && ok) {
+      const box = el('div', 'my-list ext-list');
+      const ctl = el('div', 'sp-ctl');
+      const cb = (txt, fn, cls) => { const b = el('button', 'btn ghost' + (cls ? ' ' + cls : ''), txt); b.onclick = () => { SFX.init(); SFX.play('tab'); fn(); }; ctl.appendChild(b); };
+      const pick = () => { if (SAVE.set.track !== 'ext') { SAVE.set.track = 'ext'; persist(); SFX.musicStart(); applyMusicContext(); } };
+      cb('◀◀', () => { pick(); EXTM.prev(); });
+      cb(st.playing ? '❚❚' : '▶', () => { pick(); EXTM.toggle(); }, 'sp-main');
+      cb('▶▶', () => { pick(); EXTM.next(); });
+      cb('YT', () => { pick(); EXTM.open(''); }, 'ext-yt');
+      box.appendChild(ctl);
+      for (const q of EXTM.lists) {
+        const row = el('div', 'my-row');
+        const nm = el('button', 'my-nm', `${icon('music')}<span>${escapeHtml(q.name)}</span><small>открыть</small>`);
+        nm.onclick = () => { SFX.init(); SFX.play('tab'); pick(); EXTM.open(q.url); };
+        const del = el('button', 'my-del', '✕');
+        let armed = false;
+        del.onclick = () => { if (!armed) { armed = true; del.textContent = 'УДАЛИТЬ?'; del.classList.add('armed'); SFX.play('deny'); return; } SFX.play('click'); EXTM.removeLink(q.url); renderSettingsKeep(); };
+        row.appendChild(nm); row.appendChild(del); box.appendChild(row);
+      }
+      const add = el('div', 'ext-add');
+      const inp = el('input', 'ext-in'); inp.type = 'text'; inp.placeholder = 'Название и ссылка на плейлист'; inp.autocomplete = 'off';
+      const sv = el('button', 'btn ghost', 'ДОБАВИТЬ');
+      sv.onclick = () => {
+        const r = EXTM.addLink(inp.value);
+        if (r === 'ok') { SFX.play('pick'); inp.value = ''; inp.blur(); renderSettingsKeep(); }
+        else { SFX.play('deny'); UI.note('Не получилось', r === 'dup' ? 'Такая ссылка уже есть' : r === 'full' ? 'Максимум 20 ссылок' : 'Нужна ссылка YouTube Music: «Поделиться» → «Копировать ссылку»', 'music'); }
+      };
+      add.appendChild(inp); add.appendChild(sv); box.appendChild(add);
+      box.appendChild(el('div', 'my-note', 'В YouTube Music: плейлист → «Поделиться» → «Копировать ссылку», вставь сюда. Нажал плейлист — он откроется, жми «играть» и возвращайся. Кнопки выше управляют любым плеером.'));
+      L.appendChild(box);
+    }
+  }
   L.appendChild(el('div', 'lbl', 'ПРОЧЕЕ'));
   tog('Вибрация', 'vib');
   tog('Цифры урона', 'nums');
@@ -8413,7 +8555,12 @@ function initUI() {
   on('qBack', () => { SFX.play('click'); toMenu(); });
   on('codexBtn', () => { SFX.play('click'); openCodex(); });
   on('cxBack', () => { SFX.play('click'); openProfile(); });
-  E.np.addEventListener('click', () => { if (SPOT.active()) { SFX.play('tab'); SPOT.next(); return; } if (MYMUS.active()) { SFX.init(); MYMUS.next(); SFX.play('tab'); } });
+  E.np.addEventListener('click', () => { if (EXTM.active()) { SFX.play('tab'); EXTM.next(); return; } if (SPOT.active()) { SFX.play('tab'); SPOT.next(); return; } if (MYMUS.active()) { SFX.init(); MYMUS.next(); SFX.play('tab'); } });
+  EXTM.onChange(() => {
+    if (E.np) E.np.innerHTML = trackLabel();
+    const ae = document.activeElement;
+    if (UI.cur === 'settings' && !(ae && ae.classList && ae.classList.contains('ext-in'))) renderSettingsKeep();
+  });
   SPOT.onChange(() => {
     if (E.np) E.np.innerHTML = trackLabel();
     if (UI.cur === 'settings') renderSettingsKeep();
@@ -9755,6 +9902,7 @@ window.__appUpdate = (v) => {
 };
 // short «what's new» for small updates: shown once per version
 const PATCH_NOTES = {
+  '2.9': ['YouTube Music и любые другие плееры: в «Настройки → Музыка» видно, что играет, и есть кнопки пауза, дальше, назад', 'Сохраняй ссылки на свои плейлисты YouTube Music — открываются одним нажатием', 'Нужно новое приложение (APK 2.9) и один раз дать доступ к уведомлениям'],
   '2.8': ['Spotify в игре: подключи свой аккаунт в «Настройки → Музыка» и выбирай плейлисты прямо из игры', 'Музыка играет в приложении Spotify, звуки игры — поверх. Кнопки: назад, пауза, дальше, перемешать', 'Нужен Spotify Premium и новое приложение (APK 2.8) — поставить один раз, дальше всё обновляется само'],
   '2.7': ['Музыка теперь «запекается» в готовую запись и играет как файл — не рвётся даже в самой жёсткой мясорубке', 'Каждый трек записывается один раз и хранится на телефоне (около 2 МБ)', 'В бою и с боссом музыка плавно перетекает в более мощную версию'],
   '2.6.3': ['Звук больше не рвётся: музыка планируется с запасом, а звуковой движок стал легче', 'Свечения и частицы рисуются в разы дешевле — меньше лагов в толпе', 'Ровные 60 FPS на экранах 120 Гц (120 можно включить в настройках)'],
@@ -9973,6 +10121,7 @@ function boot() {
   setTimeout(cloudInit, 0);
   MYMUS.load();
   SPOT.init();
+  EXTM.start();
   if (APP && window.IskraApp.ok) try { window.IskraApp.ok(); } catch (e) { /* older app */ }
 }
 window.__iskra = {
