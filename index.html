@@ -61,6 +61,7 @@ h2.ttl{font-family:var(--ff);font-weight:900;font-size:24px;letter-spacing:.08em
 .logo span:nth-child(2){animation-delay:.15s}.logo span:nth-child(3){animation-delay:.3s}
 .logo span:nth-child(4){animation-delay:.45s}.logo span:nth-child(5){animation-delay:.6s}
 @keyframes lf{0%,100%{transform:translateY(0)}50%{transform:translateY(-7px)}}
+.logo-ver{margin-top:11px;font-family:var(--ff);font-weight:700;font-size:10px;letter-spacing:.34em;color:#ffd34d;text-shadow:0 0 12px rgba(255,211,77,.55);padding-left:.34em}
 .logo-line{width:62%;height:2px;margin-top:14px;background:linear-gradient(90deg,transparent,#4df3ff,transparent);box-shadow:0 0 12px #4df3ff;animation:pulseO 2.4s infinite}
 @keyframes pulseO{0%,100%{opacity:.45}50%{opacity:1}}
 .menu-btns{display:flex;flex-direction:column;gap:12px;width:min(78vw,320px);margin-bottom:4vh}
@@ -754,7 +755,7 @@ body.lefty #ultBtn{right:auto;left:calc(104px + var(--sal))}
 <div id="warn"><span>ВНИМАНИЕ</span><b id="warnName"></b></div>
 
 <div id="scr-menu" class="screen">
-  <div class="logo-wrap"><div class="logo"><span>И</span><span>С</span><span>К</span><span>Р</span><span>А</span></div><div class="logo-line"></div></div>
+  <div class="logo-wrap"><div class="logo"><span>И</span><span>С</span><span>К</span><span>Р</span><span>А</span></div><div class="logo-line"></div><div class="logo-ver">4.0 · СВЕРХНОВАЯ</div></div>
   <div class="menu-bottom">
     <button class="daily-card" id="dailyCard"></button>
     <div class="records" id="menuRec"></div>
@@ -953,7 +954,7 @@ function fmtNum(n) { n = Math.round(n); if (n >= 1e6) return (n / 1e6).toFixed(1
 function vib(p) { if (!SAVE.set.vib) return; try { if (navigator.vibrate) navigator.vibrate(p); } catch (e) { /* ignore */ } }
 
 /* ================= save ================= */
-const GAME_VER = '3.0';
+const GAME_VER = '4.0';
 const SAVE_KEY = 'iskra.save.v1';
 const APP = typeof window.IskraApp !== 'undefined'; // running inside the Android app
 const FRZ = { st: '', dirty: false }; // frozen-world redraw state (see frame())
@@ -974,7 +975,7 @@ function defaultSave() {
     ach: {}, stats: { dashes: 0, ults: 0, chests: 0, legend: 0, play: 0, evoSeen: {}, flawless: 0, fast30: 0, powers: 0 },
     daily: { day: '', done: 0, total: 0 },
     profile: { login: '', key: '' }, nick: '',
-    seen2: 0, seen21: 0, seen24: 0, seen25: 0,
+    seen2: 0, seen21: 0, seen24: 0, seen25: 0, seen40: 0,
     stage: { best: 0, stars: {}, chests: {}, sel: 1, clr: 0 }, mast: {},
     quests: { day: '', list: [], rr: 0, total: 0 },
     seen: { w: {}, p: {}, evo: {}, rel: {}, en: {}, boss: {}, pw: {} },
@@ -1996,7 +1997,7 @@ const HDM = (() => {
       o.v = o.tgt > o.v ? Math.min(o.tgt, o.v + d) : Math.max(o.tgt, o.v - d);
       setV(o);
       if (o.tgt === 0 && o.v <= 0) drop(o);
-      else if (!o.started && !o.blocked && now - o.t0 > 6000) fail(o); // never began to play: the synthesizer takes over
+      else if (!o.started && !o.blocked && !o.a.paused && now - o.t0 > 6000) fail(o); // never began to play: the synthesizer takes over
     }
     if (!els.length) { clearInterval(timer); timer = 0; }
   }
@@ -2004,7 +2005,7 @@ const HDM = (() => {
     for (const o of els) o.tgt = 0;
     const a = new Audio(); a.preload = 'auto'; a.volume = 0;
     const o = { a, v: 0, tgt: 1, key: inf.key, kind: inf.kind, t0: performance.now(), tryT: 0, started: false, blocked: false, dead: false };
-    a.addEventListener('playing', () => { o.started = true; o.blocked = false; });
+    a.addEventListener('playing', () => { o.started = true; o.blocked = false; try { if (E.np && !G) E.np.innerHTML = trackLabel(); } catch (e) { /* menu not built yet */ } });
     a.addEventListener('error', () => { if (!o.dead) fail(o); });
     a.addEventListener('ended', () => {
       if (o !== cur || o.dead) return;
@@ -2022,11 +2023,16 @@ const HDM = (() => {
     sync(id, boss) {
       const inf = info(id, boss);
       if (!inf) { if (cur) { cur.tgt = 0; cur = null; key = ''; } return false; }
+      if (vol <= 0) { for (const o of els) if (!o.a.paused) { try { o.a.pause(); } catch (e) { /* ignore */ } } return true; } // muted: nothing plays, nothing is decoded
       if (inf.key !== key) start(inf);
       else if (cur && cur.a.paused && !cur.a.ended && performance.now() - cur.tryT > 700) tryPlay(cur);
       return true;
     },
-    stop() { for (const o of els) o.tgt = 0; cur = null; key = ''; },
+    // the app went to the background: timers freeze there, so no fade — pause on the spot and pick up from the same place later
+    stop() {
+      if (document.hidden) { for (const o of els) { try { o.a.pause(); } catch (e) { /* ignore */ } } return; }
+      for (const o of els) o.tgt = 0; cur = null; key = '';
+    },
     setVol(v) { vol = v; for (const o of els) setV(o); },
     set onEnd(f) { onEnd = f; },
     get playing() { return key; },
@@ -4954,7 +4960,7 @@ function gainXp(v) {
   G.xp += v * G.P.xpMul * (G.pw.xp2 > 0 ? 2 : 1);
   while (G.xp >= G.xpNeed) {
     G.xp -= G.xpNeed; G.level++; G.xpNeed = xpNeed(G.level); G.pendingLv++;
-    if (G.level >= 30 && G.t < 360 && !SAVE.stats.fast30) SAVE.stats.fast30 = 1;
+    if (G.level >= 30 && G.t < 360 && !G.blitz && !SAVE.stats.fast30) SAVE.stats.fast30 = 1; // levels fly in «Блиц»: it does not count
   }
 }
 function updateGems(dt) {
@@ -5487,7 +5493,7 @@ function achView() {
   const live = !!G;
   return {
     kills: SAVE.tot.kills + (live ? G.kills - G.paidKills : 0),
-    level: Math.max(SAVE.best.level, live ? G.level : 0),
+    level: Math.max(SAVE.best.level, live && !G.blitz ? G.level : 0),
     time: Math.max(SAVE.best.time, live ? G.t : 0),
     bosses: SAVE.tot.bosses, evoKinds: Math.max(Object.keys(SAVE.stats.evoSeen).length, SAVE.v1evo || 0),
     fast30: SAVE.stats.fast30, flawless: SAVE.stats.flawless, dw: SAVE.diffWin,
@@ -5589,7 +5595,7 @@ function questReroll(i) {
 function questVal(o) {
   if (!G) return 0;
   if (o.id === 'survive') return G.t;
-  if (o.id === 'level') return G.level;
+  if (o.id === 'level') return G.blitz ? 0 : G.level;
   if (o.id === 'hero') return G.ch.id === o.h ? G.t : 0;
   if (o.id === 'hard') return !G.daily && !G.rush && G.diff >= 2 ? G.t : 0;
   if (o.id === 'rush') return G.rush ? G.bossKills | 0 : 0;
@@ -5691,7 +5697,7 @@ async function importCode(code) {
 function applyImported(data) {
   const set = SAVE.set, prof = SAVE.profile, seen2 = SAVE.seen2, seen21 = SAVE.seen21;
   SAVE = migrateSave(data);
-  SAVE.set = set; SAVE.profile = prof; SAVE.seen2 = seen2; SAVE.seen21 = seen21;
+  SAVE.set = set; SAVE.profile = prof; SAVE.seen2 = seen2; SAVE.seen21 = seen21; SAVE.seen40 = 1;
   achCheck(true);
   persist();
 }
@@ -8506,7 +8512,7 @@ function trackLabel() {
   if (SPOT.active()) { const n = SPOT.now; return `${icon('music')}${n && n.name ? escapeHtml(n.name + (n.by ? ' — ' + n.by : '')) : 'Spotify'} · <u>дальше</u>`; }
   if (MYMUS.active()) return `${icon('music')}${escapeHtml(MYMUS.current() || 'Мои треки')} · <u>дальше</u>`;
   const tr = TRACKS_UI.find((q) => q.id === SFX.track);
-  return tr ? `${icon('music')}${tr.name} · ${tr.style}` : '';
+  return tr ? `${icon('music')}${tr.name} · ${tr.style}${HDM.playing ? ' · <u>HD</u>' : ''}` : '';
 }
 const GAME_URL = 'https://claude.ai/artifact/WzdPuJYAiVdpszkZ9rzgo3';
 let pickHelp = false, pickT = 0, pickSeen = false;
@@ -9334,7 +9340,7 @@ function adoptCloud() {
   if (!CLOUD.incoming) return false;
   const set = SAVE.set, prof = SAVE.profile, seen = SAVE.seen2;
   SAVE = migrateSave(clone(CLOUD.incoming));
-  SAVE.set = set; SAVE.seen2 = SAVE.seen2 || seen;
+  SAVE.set = set; SAVE.seen2 = SAVE.seen2 || seen; SAVE.seen40 = 1;
   if (!SAVE.profile || !SAVE.profile.key) SAVE.profile = prof;
   CLOUD.incoming = null;
   achCheck(true);
@@ -9757,7 +9763,7 @@ function needsReg() { return !SAVE.profile.login && !SAVE.nick && !((SAVE.tot.ru
 function regCloud() { return !!PROF.db && PROF.canWrite !== false; }
 function openReg() { STATE = 'reg'; REG.mode = 'new'; REG.drawn = ''; renderReg(); UI.show('reg'); }
 function regDone(name, how) {
-  SAVE.nick = name; SAVE.seen2 = 1; SAVE.seen21 = 1; SAVE.seen24 = 1; SAVE.seen25 = 1; SAVE.seen26 = 1;
+  SAVE.nick = name; SAVE.seen2 = 1; SAVE.seen21 = 1; SAVE.seen24 = 1; SAVE.seen25 = 1; SAVE.seen26 = 1; SAVE.seen40 = 1; SAVE.patchSeen = GAME_VER;
   persist(); SFX.init(); SFX.musicStart(); SFX.play('buy');
   toMenu();
   UI.note('Привет, ' + name + '!', how, 'user');
@@ -10614,6 +10620,35 @@ function showNews25(bonus) {
   E.newsBonus.innerHTML = bonus > 0 ? `За прошлые достижения: +${bonus} ◆` : '';
   UI.show('news');
 }
+/* ---------- what's new in 4.0 ---------- */
+const GIFT40 = 500;
+function showNews40(bonus) {
+  STATE = 'news';
+  const items = [
+    ['user', '4 новых героя: Плеяда, Вулкан, Пульсар и Спора — у каждого своё оружие'],
+    ['drone', '4 новых оружия с эволюциями: Светлячки, Мины, Рикошет и Токсин'],
+    ['thunder', 'Два новых босса: Громовержец с молниями и Хронос со стрелками-лучами'],
+    ['skull', 'Новые враги: Прыгун, Призыватель, Мортира и Воришка, который крадёт кристаллы'],
+    ['clock', 'Режим «Блиц»: 5 минут, рой растёт вдвое быстрее, каждый враг — очко'],
+    ['paw', 'Питомцы: 8 спутников со своими талантами — ищи в магазине'],
+    ['sparkle', '3 новых усиления, 4 реликвии, умение «Звездопад», улучшения, фоны, цвета и титулы'],
+    ['music', '4 новых трека: Полёт, Гром, Часы и Блиц'],
+  ];
+  document.querySelector('#scr-news .ttl').textContent = 'ОБНОВЛЕНИЕ 4.0';
+  E.newsList.innerHTML = items.map(([ic, t], i) => `<div class="ni" style="animation-delay:${0.1 + i * 0.07}s">${icon(ic)}<span>${t}</span></div>`).join('') +
+    `<div class="ni" id="newsHd" style="animation-delay:${0.1 + items.length * 0.07}s">${icon('image')}<span>HD-пакет: студийный саундтрек и фоны-туманности — внутри приложения 4.0</span></div>`;
+  // the pack answers a moment later: say what this very app carries
+  HD.onReady(() => {
+    const n = document.getElementById('newsHd'), hi = HD.info();
+    if (n && hi) n.querySelector('span').textContent = `HD-пакет уже здесь: ${hi.min} минут студийного саундтрека (${hi.music} композиций) и ${hi.bg} фонов-туманностей`;
+  });
+  // the gift is given once, here, so it can never be collected twice
+  SAVE.shards += GIFT40; SAVE.earned = (SAVE.earned | 0) + GIFT40;
+  SAVE.seen40 = 1; SAVE.seen2 = 1; SAVE.seen21 = 1; SAVE.seen24 = 1; SAVE.seen25 = 1; SAVE.seen26 = 1; SAVE.patchSeen = GAME_VER; SAVE.updSeen = GAME_VER;
+  persist();
+  E.newsBonus.innerHTML = `Подарок к обновлению: +${GIFT40} ◆` + (bonus > 0 ? ` · за прошлые достижения: +${bonus} ◆` : '');
+  UI.show('news');
+}
 /* ---------- the Android app downloads new versions by itself ---------- */
 const UPD = { ver: '' };
 function renderUpdBtn() {
@@ -10905,7 +10940,7 @@ SHOT.cloud = (s, dt) => {
     damageEnemy(e, s.dps * 0.25, 'toxin', { noCrit: true, quiet: true });
     if (!key.dead) slowE(key, s.slow, 0.5);
   }
-  if (Math.random() < 0.7) emit(s.x + rnd(-s.r, s.r) * 0.6, s.y + rnd(-s.r, s.r) * 0.6, rnd(-20, 20), rnd(-45, -10), 0.6, 4, CI_TOX, 0, 2);
+  if (Math.random() < 0.35) emit(s.x + rnd(-s.r, s.r) * 0.6, s.y + rnd(-s.r, s.r) * 0.6, rnd(-20, 20), rnd(-45, -10), 0.6, 3, CI_TOX, 0, 2);
 };
 /* how the new shots look (called from drawShots; blend mode is 'lighter' on entry and must be on exit) */
 const SHOT4_DRAW = {
@@ -10938,13 +10973,17 @@ const SHOT4_DRAW = {
     const h = Math.sin(Math.min(1, s.fly) * Math.PI), k = 1 + h * 0.6;
     glowAt(CI_TOX, X, Y - h * 30 * Z, 9 * Z * k, 0.9); glowAt(CI_WHITE, X, Y - h * 30 * Z, 3.2 * Z * k, 0.9);
   },
-  cloud(s, X, Y) {
-    const a = 0.55 * Math.min(1, (s.max - s.life) / 0.3) * Math.min(1, s.life / 0.5), R = s.r * Z;
-    for (let i = 0; i < 5; i++) { const an = s.rot + i * 1.2566; glowAt(CI_TOX, X + Math.cos(an) * R * 0.42, Y + Math.sin(an) * R * 0.42, R * 0.78, a * 0.5); }
-    haloAt(CI_TOX, X, Y, R * 1.15, a * 0.6);
-    ctx.globalAlpha = a * 0.55; ctx.strokeStyle = s.evo ? '#e6ff9a' : C.toxin; ctx.lineWidth = 1.5 * Z;
+  cloud(s, X, Y) { // drawn without additive light: a dozen overlapping clouds must tint the field, not white it out
+    const a = Math.min(1, (s.max - s.life) / 0.3) * Math.min(1, s.life / 0.5), R = s.r * Z;
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.globalAlpha = 0.15 * a; ctx.fillStyle = s.evo ? '#8fd93a' : '#7fd13a';
+    ctx.beginPath(); ctx.arc(X, Y, R, 0, TAU); ctx.fill();
+    ctx.globalAlpha = 0.1 * a;
+    for (let i = 0; i < 3; i++) { const an = s.rot + i * 2.094; ctx.beginPath(); ctx.arc(X + Math.cos(an) * R * 0.38, Y + Math.sin(an) * R * 0.38, R * 0.5, 0, TAU); ctx.fill(); }
+    ctx.globalAlpha = 0.5 * a; ctx.strokeStyle = s.evo ? '#e6ff9a' : C.toxin; ctx.lineWidth = 1.5 * Z;
     ctx.setLineDash([6 * Z, 7 * Z]); ctx.lineDashOffset = -G.rt * 22 * Z;
     ctx.beginPath(); ctx.arc(X, Y, R, 0, TAU); ctx.stroke(); ctx.setLineDash([]);
+    ctx.globalCompositeOperation = 'lighter';
   },
 };
 function draw40Weapons() {
@@ -11069,7 +11108,7 @@ function update40(dt) {
   }
   if (!G.rush && !G.over && !G.winPending && G.t > 45) { // a thief shows up now and then
     G.thiefT -= dt;
-    if (G.thiefT <= 0) { G.thiefT = rnd(50, 80); if (G.gems.length > 6 && !G.enemies.some((q) => q.type === 'thief' && !q.dead)) { const p = offscreenPos(30, 0); spawnEnemy('thief', p[0], p[1]); UI.hint('Воришка крадёт кристаллы — догони его!', 'gem'); } }
+    if (G.thiefT <= 0) { G.thiefT = rnd(50, 80); if (G.gems.length > 6 && !G.enemies.some((q) => q.type === 'thief' && !q.dead)) { const p = offscreenPos(30, 0); spawnEnemy('thief', p[0], p[1]); if ((SAVE.stats.thiefSeen | 0) < 3) { SAVE.stats.thiefSeen = (SAVE.stats.thiefSeen | 0) + 1; UI.hint('Воришка крадёт кристаллы — догони его!', 'gem'); } } }
   }
   if (P.barrier && P.alive) { // «Барьер»: one free hit, back after a while
     if (G.shield > 0) G.barT = BARRIER_CD[P.barrier];
@@ -11882,7 +11921,7 @@ function boot() {
   buildGemSprites();
   initUI();
   prewarm();
-  const firstV2 = !SAVE.seen2, firstV21 = !SAVE.seen21, firstV24 = !SAVE.seen24, firstV25 = !SAVE.seen25;
+  const firstV2 = !SAVE.seen2, firstV21 = !SAVE.seen21, firstV24 = !SAVE.seen24, firstV25 = !SAVE.seen25, firstV40 = !SAVE.seen40;
   const before = SAVE.shards;
   achCheck(true);
   const bonus = SAVE.shards - before;
@@ -11890,6 +11929,7 @@ function boot() {
   applyLefty(); applyOrientation();
   toMenu();
   if (needsReg()) openReg(); // brand-new player: sign up first
+  else if (firstV40) showNews40(bonus);
   else if (firstV25) showNews25(bonus);
   else if (!SAVE.seen26) showNews26();
   else if (PATCH_NOTES[GAME_VER] && SAVE.patchSeen !== GAME_VER) showPatch(GAME_VER);
