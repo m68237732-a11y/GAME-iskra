@@ -963,7 +963,7 @@ function defaultSave() {
     best: { time: 0, kills: 0, level: 0, rush: 0 },
     mode: 'run',
     tot: { kills: 0, runs: 0, wins: 0, evos: 0, bosses: {} },
-    set: { sfx: 1, music: 1, vib: 1, nums: 1, gfx: 'auto', track: 'auto', mv: 0.65, sv: 0.75, shake: 1, fps: 0, cap: 0, lefty: 0, rot: 0, intro: 1 },
+    set: { sfx: 1, music: 1, vib: 1, nums: 1, gfx: 'auto', track: 'auto', mv: 0.65, sv: 0.75, shake: 1, fps: 0, cap: 0, lefty: 0, rot: 0, intro: 1, hdmus: 1, hdbg: 1 },
     tut: 0, nmUnlocked: 0, nm: 0,
     diff: 1, diffWin: {},
     own: { sk_classic: 1, tr_dots: 1, tr_none: 1, bg_auto: 1, bg_cosmos: 1, fx_sparks: 1, col_hero: 1, au_none: 1, t_none: 1, t_rookie: 1 },
@@ -1560,8 +1560,12 @@ const TRACKS_UI = [
   { id: 'frost', name: 'Лёд', style: 'гэридж' },
   { id: 'inferno', name: 'Инферно', style: 'индастриал' },
   { id: 'epic', name: 'Финал', style: 'эпик' },
+  { id: 'voyage', name: 'Полёт', style: 'ретровейв' },
+  { id: 'storm', name: 'Гром', style: 'брейкбит' },
+  { id: 'clock', name: 'Часы', style: 'шкатулка' },
+  { id: 'blitz', name: 'Блиц', style: 'хардкор' },
 ];
-const RUN_TRACKS = ['spark', 'phonk', 'acid', 'arena', 'chip', 'nebula', 'hyper', 'dark', 'frost', 'inferno'];
+const RUN_TRACKS = ['spark', 'phonk', 'acid', 'arena', 'chip', 'nebula', 'hyper', 'dark', 'frost', 'inferno', 'voyage', 'storm', 'clock'];
 const CH_TRACKS = ['spark', 'nebula', 'acid', 'frost', 'inferno', 'phonk', 'chip', 'hyper', 'dark', 'epic']; // a sound for every chapter of the levels
 function musicFor(ctx) {
   const sel = SAVE.set.track;
@@ -1917,6 +1921,143 @@ QUESTS.push(
 );
 for (const q of QUESTS) QUEST_MAP[q.id] = q;
 
+/* ================= 4.0: the HD pack — a studio soundtrack and painted backdrops that ship inside the app =================
+   The app carries them in its assets. A downloaded update running in an older app (or the game opened in a browser)
+   simply does not find the pack and falls back to the synthesizer and the drawn backgrounds, exactly as before. */
+const HD = (() => {
+  const base = (typeof window.__hdBase === 'string' && window.__hdBase) || (APP ? 'file:///android_asset/hd/' : '');
+  let man = null, st = base ? 0 : -1; // -1 no pack, 0 not asked yet, 1 loading, 2 ready
+  const waiters = [], imgs = {};
+  function load() {
+    if (st !== 0) return;
+    st = 1;
+    const s = document.createElement('script');
+    const done = (ok) => {
+      if (st !== 1) return;
+      man = ok && window.ISKRA_HD && window.ISKRA_HD.v ? window.ISKRA_HD : null; st = man ? 2 : -1;
+      waiters.splice(0).forEach((f) => { try { f(); } catch (e) { /* ignore */ } });
+    };
+    s.onload = () => done(true); s.onerror = () => done(false);
+    setTimeout(() => done(false), 6000);
+    s.src = base + 'pack.js';
+    document.head.appendChild(s);
+  }
+  // a painted backdrop for a theme: loads on first use, only the last two stay in memory
+  function bg(id) {
+    if (st !== 2 || !man.bg || !man.bg[id] || SAVE.set.hdbg === 0) return null;
+    let r = imgs[id];
+    if (!r) {
+      const keys = Object.keys(imgs);
+      if (keys.length >= 2) { const old = keys.find((k) => k !== HDBG.cur && k !== HDBG.prev) || keys[0]; imgs[old].im.src = ''; delete imgs[old]; }
+      r = imgs[id] = { im: new Image(), ok: false };
+      r.im.onload = () => { r.ok = true; FRZ.dirty = true; };
+      r.im.onerror = () => { r.bad = true; };
+      r.im.src = base + man.bg[id];
+    }
+    return r.ok ? r.im : null;
+  }
+  return {
+    load, bg, base,
+    get ready() { return st === 2; }, get man() { return man; },
+    onReady(f) { if (st === 2 || st === -1) f(); else waiters.push(f); },
+    info() { return st === 2 ? { music: Object.keys(man.music || {}).length, bg: Object.keys(man.bg || {}).length, mb: man.mb || 0 } : null; },
+  };
+})();
+/* the soundtrack: whole compositions streamed from the pack by plain <audio> (no decoding into memory, no baking) */
+const HD_GAIN = 1.0; // pack loudness against the synthesizer at the same slider position (see tools: the pack is levelled to match)
+const HDM = (() => {
+  const els = [], bad = {}, FADE = 1.1;
+  let cur = null, key = '', vol = 0, timer = 0, onEnd = null;
+  function info(id, boss) {
+    const m = HD.ready && SAVE.set.hdmus !== 0 && HD.man.music && HD.man.music[id];
+    if (!m) return null;
+    const k = boss && m.boss && !bad[id + ':boss'] ? 'boss' : 'run';
+    if (!m[k] || bad[id + ':' + k]) return null;
+    return { key: id + ':' + k, file: m[k], kind: k };
+  }
+  function kill(o) { o.dead = true; try { o.a.pause(); o.a.removeAttribute('src'); o.a.load(); } catch (e) { /* gone */ } }
+  function drop(o) { kill(o); const i = els.indexOf(o); if (i >= 0) els.splice(i, 1); if (o === cur) { cur = null; key = ''; } }
+  function fail(o) { bad[o.key] = 1; drop(o); }
+  function setV(o) { try { o.a.volume = clamp(o.v * vol, 0, 1); } catch (e) { /* ignore */ } }
+  function tryPlay(o) {
+    o.tryT = performance.now();
+    let pr; try { pr = o.a.play(); } catch (e) { fail(o); return; }
+    if (pr && pr.catch) pr.catch((e) => { if (e && e.name === 'NotAllowedError') o.blocked = true; else if (e && e.name === 'NotSupportedError') fail(o); });
+  }
+  function step() {
+    const now = performance.now(), d = 0.05 / FADE;
+    for (let i = els.length - 1; i >= 0; i--) {
+      const o = els[i];
+      o.v = o.tgt > o.v ? Math.min(o.tgt, o.v + d) : Math.max(o.tgt, o.v - d);
+      setV(o);
+      if (o.tgt === 0 && o.v <= 0) drop(o);
+      else if (!o.started && !o.blocked && now - o.t0 > 6000) fail(o); // never began to play: the synthesizer takes over
+    }
+    if (!els.length) { clearInterval(timer); timer = 0; }
+  }
+  function start(inf) {
+    for (const o of els) o.tgt = 0;
+    const a = new Audio(); a.preload = 'auto'; a.volume = 0;
+    const o = { a, v: 0, tgt: 1, key: inf.key, kind: inf.kind, t0: performance.now(), tryT: 0, started: false, blocked: false, dead: false };
+    a.addEventListener('playing', () => { o.started = true; o.blocked = false; });
+    a.addEventListener('error', () => { if (!o.dead) fail(o); });
+    a.addEventListener('ended', () => {
+      if (o !== cur || o.dead) return;
+      if (onEnd && onEnd(o.kind) === true) return; // the playlist moved on
+      try { a.currentTime = 0; } catch (e) { /* ignore */ }
+      tryPlay(o);
+    });
+    a.src = HD.base + inf.file;
+    els.push(o); cur = o; key = inf.key;
+    tryPlay(o);
+    if (!timer) timer = setInterval(step, 50);
+  }
+  return {
+    // true: the pack has this track and it is playing (or about to); false: play the synthesizer instead
+    sync(id, boss) {
+      const inf = info(id, boss);
+      if (!inf) { if (cur) { cur.tgt = 0; cur = null; key = ''; } return false; }
+      if (inf.key !== key) start(inf);
+      else if (cur && cur.a.paused && !cur.a.ended && performance.now() - cur.tryT > 700) tryPlay(cur);
+      return true;
+    },
+    stop() { for (const o of els) o.tgt = 0; cur = null; key = ''; },
+    setVol(v) { vol = v; for (const o of els) setV(o); },
+    set onEnd(f) { onEnd = f; },
+    get playing() { return key; },
+    has(id) { return !!info(id, false); },
+    _els: () => els.map((o) => ({ key: o.key, v: +o.v.toFixed(2), t: +(o.a.currentTime || 0).toFixed(2), paused: o.a.paused, started: o.started, vol: +o.a.volume.toFixed(3) })),
+    _bad: () => Object.keys(bad),
+  };
+})();
+/* painted nebulae drift behind the stars: a tiling picture on a slow parallax, cross-faded when the theme changes */
+const HDBG = { cur: '', prev: '', fade: 1, vig: null };
+const HD_AUTO = ['cosmos', 'galaxy', 'nebula', 'crimson']; // «Авто» walks through these as a run heats up
+function hdBackdrop(th, t, camx, camy, cw, ch, st) {
+  if (!HD.ready || QUAL.lvl === 0) return;
+  let id = th.id;
+  if (id === 'cosmos' && isAutoBg()) id = HD_AUTO[st < 150 ? 0 : st < 300 ? 1 : st < 450 ? 2 : 3];
+  if (!HD.bg(id)) { if (!HD.bg(HDBG.cur)) return; id = HDBG.cur; } // still loading: keep what is on screen
+  if (id !== HDBG.cur) { HDBG.prev = HDBG.cur; HDBG.cur = id; HDBG.fade = HDBG.prev ? 0 : 1; }
+  if (HDBG.fade < 1) HDBG.fade = Math.min(1, HDBG.fade + 0.014);
+  const T = Math.ceil(Math.max(cw, ch) * 0.92), f = 0.085 * Z;
+  let ox = -(((camx * f + t * 2.2 * RS) % T) + T) % T, oy = -(((camy * f + t * 1.1 * RS) % T) + T) % T;
+  ox = Math.round(ox); oy = Math.round(oy);
+  const lay = (im, a) => {
+    if (!im || a <= 0.01) return;
+    ctx.globalAlpha = a;
+    for (let y = oy; y < ch; y += T) for (let x = ox; x < cw; x += T) ctx.drawImage(im, x, y, T + 1, T + 1);
+  };
+  if (HDBG.fade < 1) lay(HD.bg(HDBG.prev), 0.92);
+  lay(HD.bg(HDBG.cur), 0.92 * HDBG.fade);
+  ctx.globalAlpha = 1;
+  if (!HDBG.vig) { // a soft vignette, like the drawn backdrop has
+    const c = mkCanvas(64, 64), g = c.getContext('2d'), gr = g.createRadialGradient(32, 32, 14, 32, 32, 46);
+    gr.addColorStop(0, 'rgba(0,0,0,0)'); gr.addColorStop(1, 'rgba(0,0,0,0.6)'); g.fillStyle = gr; g.fillRect(0, 0, 64, 64); HDBG.vig = c;
+  }
+  ctx.drawImage(HDBG.vig, 0, 0, cw, ch);
+}
+
 /* ================= audio (fully synthesized) ================= */
 const VOL_DEF = { mv: 0.65, sv: 0.75 }; // first launch: comfortable, not ear-splitting
 const volOf = (k) => (SAVE.set[k] === undefined ? VOL_DEF[k] : SAVE.set[k]);
@@ -1968,6 +2109,7 @@ const SFX = (() => {
     sfxBus.gain.value = SAVE.set.sfx ? SFX_MAX * sv * sv : 0;
     musBus.gain.value = 1;
     musLvl.gain.value = SAVE.set.music ? MUS_MAX * mv * mv * musVol : 0;
+    HDM.setVol(SAVE.set.music ? Math.min(1, MUS_MAX * mv * mv * musVol * HD_GAIN) : 0);
     MYMUS.volUpdate();
   }
   // headphone-friendly space: every music voice goes to a role bus with its own reverb / ping-pong delay sends;
@@ -2436,12 +2578,104 @@ const SFX = (() => {
     if (ph === 0 && st === 0 && s > 0) iCrash(t, 0.05);
     if (I >= 2 && ph === 7 && st >= 8) iTom(t, 47 - (st - 8), 0.1, (st - 11) * 0.12);
   }
+  /* --- 4.0: four new tracks --- */
+  // «Полёт» — ретровейв: гейтованный бас, широкие пады и певучий лид
+  const VY_CH = [[59, 62, 66], [55, 59, 62], [57, 62, 66], [57, 61, 64]], VY_B = [35, 43, 38, 45];
+  const VY_MEL = [78, 0, 0, 74, 0, 0, 78, 0, 79, 0, 0, 74, 0, 0, 71, 0, 81, 0, 0, 78, 0, 0, 74, 0, 76, 0, 0, 73, 0, 76, 78, 0];
+  function tVoyage(s, t, d, I, B) {
+    const bar = Math.floor(s / 16) % 4, st = s % 16, ch = VY_CH[bar], root = VY_B[bar], ph = Math.floor(s / 16) % 8, e8 = Math.floor(s / 2) % 32;
+    if (st === 0) { iSaw(t, ch, d * 16, { v: 0.006, a: 0.45, lp: 1500 + I * 300, hold: 0.85 }); iPad(t, [ch[0] - 12], d * 16, 0.02, 'sine', 500); }
+    if (st % 2 === 0) iBass(t, root + (st % 4 === 2 ? 12 : 0), d * 1.5, { lp: 480 + I * 200, lp2: 150, q: 4, v: I ? 0.06 : 0.04, sub: st % 8 === 0 ? 0.05 : 0 });
+    if (I >= 1) { iPluck(t, ch[[0, 1, 2, 1, 2, 1, 0, 1][st % 8]] + 12, { v: 0.011, lp: 2600 + I * 400, dur: 0.17, pan: st % 2 ? 0.4 : -0.4 }); if (st % 4 === 2) iHat(t, 0.028); }
+    if (I >= 2) {
+      if (st === 0 || st === 8 || (st === 6 && bar % 2 === 1)) iKick(t, 0.31);
+      if (st === 4 || st === 12) { iSnare(t, 0.085); MN({ role: 'snare', ft: 'bandpass', f: 1400, q: 0.7, dur: 0.28, v: 0.03, at: t }); }
+      if (st % 2 === 1) iHat(t, 0.013);
+      if (st % 2 === 0 && VY_MEL[e8]) iLead(t, VY_MEL[e8], d * 2 * melLen(VY_MEL, e8, 6) * 0.92, { type: 'sawtooth', v: 0.015, lp: 3000, lp2: 1500, a: 0.02, hold: 0.65, det: 5, pan: 0 });
+      if (ph === 7 && st >= 8 && st % 2 === 0) iTom(t, 52 - (st - 8), 0.12, (st - 11) * 0.14);
+      if (ph === 0 && st === 0 && s > 0) iCrash(t, 0.04);
+    }
+    if ((I >= 3 || B) && st % 2 === 0 && VY_MEL[e8]) iLead(t, VY_MEL[e8] + 12, d * 2 * melLen(VY_MEL, e8, 6) * 0.9, { type: 'square', v: 0.006, lp: 4200, lp2: 2000, a: 0.02, hold: 0.6, pan: 0 });
+    if (B && st % 2 === 1) iBass(t, root + 12, d * 0.7, { lp: 800, lp2: 240, q: 5, v: 0.034 });
+  }
+  // «Гром» — брейкбит: ломаный бит, рычащий бас, электрические арпеджио и раскаты
+  const ST_CH = [[52, 55, 59], [48, 52, 55], [55, 59, 62], [50, 54, 57]], ST_B = [40, 36, 43, 38];
+  const ST_MEL = [76, 0, 79, 76, 0, 74, 76, 0, 79, 0, 81, 79, 0, 76, 74, 0, 76, 0, 79, 76, 0, 83, 81, 0, 79, 0, 76, 0, 74, 0, 71, 0];
+  function tStorm(s, t, d, I, B) {
+    const bar = Math.floor(s / 16) % 4, st = s % 16, ch = ST_CH[bar], root = ST_B[bar], ph = Math.floor(s / 16) % 8;
+    if (st === 0) {
+      iSaw(t, ch, d * 15, { v: 0.0055, a: 0.25, lp: 1200 + I * 250, hold: 0.7, det: 16 });
+      iBass(t, root, d * 9, { det: 11, lp: 420, lp2: 260, q: 3, v: 0.055 }); iBass(t, root, d * 9, { det: -11, lp: 420, lp2: 260, q: 3, v: 0.055 });
+    }
+    if (st === 10 || st === 13) iBass(t, root + (st === 13 ? 12 : 0), d * 2.6, { det: 9, lp: 600, lp2: 220, v: 0.05, drive: true });
+    if (I >= 1) {
+      if (st % 2 === 0) iHat(t, st % 4 === 2 ? 0.034 : 0.02);
+      if (st === 0 || st === 6 || st === 11) iSaw(t, ch.map((m) => m + 12), d * 1.8, { role: 'lead', v: 0.0065, a: 0.004, lp: 2800, lp2: 900, det: 10, spread: 0.6 });
+    }
+    if (I >= 2) {
+      if (st === 0 || st === 10 || (st === 3 && bar % 2 === 1)) iKick(t, 0.33, true);
+      if (st === 4 || st === 12) iSnare(t, 0.085);
+      if (st === 7 || st === 9 || st === 15) iSnare(t, 0.02);
+      if (st % 2 === 1) iHat(t, 0.012);
+      iLead(t, ch[[0, 2, 1, 2][st % 4]] + 24, d * 0.6, { role: 'arp', type: 'square', v: 0.0065, lp: 4200, lp2: 1800 });
+      if (ph === 0 && st === 0 && s > 0) { iCrash(t, 0.045); MN({ role: 'fx', ft: 'lowpass', f: 420, f2: 60, dur: 1.9, v: 0.06, at: t }); }
+      if (ph === 7 && st === 0) iRiser(t, d * 16, 0.03);
+    }
+    if (I >= 3 || B) { const e8 = Math.floor(s / 2) % 32; if (st % 2 === 0 && ST_MEL[e8]) iLead(t, ST_MEL[e8], d * 2 * melLen(ST_MEL, e8, 3) * 0.85, { type: 'sawtooth', v: 0.014, lp: 3200, lp2: 1200, det: 7, hold: 0.5, pan: 0 }); }
+    if (B) { if (st % 4 === 3) iHat(t, 0.02, true); if (bar === 3 && st >= 12) iSnare(t, 0.03 + (st - 12) * 0.012); }
+  }
+  // «Часы» — тик-так, музыкальная шкатулка и бой башенных часов
+  const CK_CH = [[57, 60, 64], [53, 57, 60], [50, 53, 57], [52, 56, 59]], CK_B = [45, 41, 38, 40];
+  const CK_MEL = [81, 0, 84, 0, 88, 0, 84, 0, 81, 0, 84, 0, 89, 0, 84, 0, 86, 0, 89, 0, 86, 0, 81, 0, 83, 0, 80, 0, 88, 0, 83, 0];
+  function tClock(s, t, d, I, B) {
+    const bar = Math.floor(s / 16) % 4, st = s % 16, ch = CK_CH[bar], root = CK_B[bar], ph = Math.floor(s / 16) % 8, e8 = Math.floor(s / 2) % 32;
+    if (st % 4 === 0) M({ role: 'drum', type: 'square', f: st % 8 === 0 ? 1900 : 1420, dur: 0.035, v: 0.013, at: t, lp: 6000, pan: st % 8 === 0 ? -0.3 : 0.3 });
+    if (st === 0) { iPad(t, ch, d * 16, 0.022, 'triangle', 1300); iSaw(t, [ch[0] - 12, ch[2] - 12], d * 16, { v: 0.004, a: 0.5, lp: 1000, hold: 0.8 }); }
+    if (st % 4 === 0 || (I >= 1 && st % 4 === 2)) iBass(t, root + (st % 4 === 2 ? 12 : 0), d * 1.4, { lp: 620 + I * 160, lp2: 200, q: 4, v: I ? 0.058 : 0.04, sub: st % 8 === 0 ? 0.045 : 0 });
+    if (st % 2 === 0 && CK_MEL[e8] && (I >= 1 || st === 0)) iBell(t, CK_MEL[e8], I >= 2 ? 0.026 : 0.02, 1.1, ((e8 % 4) - 1.5) * 0.25);
+    if (I >= 1 || st % 2 === 0) iPluck(t, ch[[0, 2, 1, 2][st % 4]] + 12, { type: 'square', v: I ? 0.0085 : 0.006, lp: 3000, dur: 0.11, pan: st % 2 ? 0.45 : -0.45 });
+    if (I >= 2) {
+      if (st % 4 === 0) iKick(t, 0.3);
+      if (st === 4 || st === 12) iClap(t, 0.055);
+      if (st % 4 === 2) iHat(t, 0.026, true);
+      if (st % 2 === 1) MN({ role: 'drum', ft: 'bandpass', f: 5200, q: 3, dur: 0.018, v: 0.016, at: t, pan: st % 4 === 1 ? 0.35 : -0.35 });
+      if (ph === 0 && st === 0 && s > 0) { iCrash(t, 0.035); iBell(t, 57, 0.05, 3.2, 0); iBell(t, 45, 0.04, 3.6, 0); }
+      if (ph === 7 && bar === 3 && st >= 8) iHat(t, 0.012 + (st - 8) * 0.003);
+    }
+    if (I >= 3 || B) {
+      if (st % 2 === 0 && CK_MEL[e8]) iLead(t, CK_MEL[e8] - 12, d * 1.8, { type: 'sawtooth', v: 0.012, lp: 2600, lp2: 1100, det: 6, pan: 0 });
+      if (st % 4 === 3) iPluck(t, ch[1] + 24, { type: 'square', v: 0.006, lp: 5000, dur: 0.08 });
+    }
+    if (B && st % 2 === 0) iBass(t, root + 12, d * 0.8, { lp: 900, lp2: 300, q: 6, v: 0.03, drive: true });
+  }
+  // «Блиц» — хэппи-хардкор: прямая бочка, бас в слабую долю и звонкая мелодия
+  const BZ_CH = [[53, 57, 60], [55, 60, 64], [53, 57, 62], [53, 58, 62]], BZ_B = [41, 36, 38, 34];
+  const BZ_MEL = [81, 0, 84, 0, 89, 0, 84, 81, 79, 0, 84, 0, 88, 0, 84, 79, 81, 0, 86, 0, 89, 0, 86, 81, 82, 0, 86, 0, 89, 0, 86, 84];
+  function tBlitz(s, t, d, I, B) {
+    const bar = Math.floor(s / 16) % 4, st = s % 16, ch = BZ_CH[bar], root = BZ_B[bar], ph = Math.floor(s / 16) % 8;
+    if (st === 0) iSaw(t, ch, d * 16, { v: I >= 2 ? 0.005 : 0.0065, a: 0.2, lp: I >= 2 ? 3000 : 1700, hold: 0.85 });
+    if (st % 4 === 2 || (I >= 3 && st % 4 === 3)) iBass(t, root + 12, d * 1.1, { lp: 1000, lp2: 280, q: 4, v: 0.06, sub: 0.045 });
+    if (st === 0 || st === 3 || st === 6 || st === 10 || st === 13) iPluck(t, ch[st % 3] + 12, { type: 'triangle', v: 0.02, lp: 3600, dur: 0.2, pan: st % 2 ? 0.3 : -0.3 });
+    if (I >= 1) { if (st % 4 === 0) iKick(t, 0.34, true); if (st % 4 === 2) iHat(t, 0.034, true); }
+    if (I >= 2) {
+      if (st === 4 || st === 12) iClap(t, 0.06);
+      if (st % 2 === 1) iHat(t, 0.012);
+      const m = BZ_MEL[Math.floor(s / 2) % 32];
+      if (st % 2 === 0 && m) { iPluck(t, m, { role: 'lead', v: 0.012, lp: 4600, dur: 0.26, det: 9, pan: -0.35 }); iPluck(t, m, { role: 'lead', v: 0.012, lp: 4600, dur: 0.26, det: -9, pan: 0.35 }); }
+      if (ph === 7) { if (st === 0) iRiser(t, d * 16, 0.035); if (st >= 8) iSnare(t, 0.02 + (st - 8) * 0.006); }
+      if (ph === 0 && st === 0 && s > 0) iCrash(t, 0.045);
+    }
+    if (I >= 3 || B) iPluck(t, ch[st % 3] + 24, { v: 0.0065, lp: 5200, dur: 0.09, pan: st % 2 ? 0.5 : -0.5 });
+    if (B && st % 4 === 1) MN({ role: 'drum', ft: 'highpass', f: 7500, dur: 0.02, v: 0.016, at: t });
+  }
   const TR = {
     // vol: loudness trims, measured (K-weighted RMS at in-run intensity) so every track sits at the same level
     spark: { bpm: 118, bossBpm: 132, fn: tSpark, vol: 1.01 }, phonk: { bpm: 132, fn: tPhonk, vol: 0.57 }, dnb: { bpm: 172, fn: tDnb, vol: 1.09 },
     chip: { bpm: 144, fn: tChip, vol: 2.25 }, acid: { bpm: 128, fn: tAcid, vol: 0.76 }, ambient: { bpm: 72, fn: tAmbient, vol: 2.0 }, arena: { bpm: 150, fn: tArena, vol: 0.52 },
     nebula: { bpm: 100, fn: tNebula, vol: 1.19 }, hyper: { bpm: 138, bossBpm: 142, fn: tHyper, vol: 0.81 }, dark: { bpm: 108, bossBpm: 116, fn: tDark, vol: 0.94 },
     frost: { bpm: 130, fn: tFrost, vol: 0.68 }, inferno: { bpm: 145, bossBpm: 150, fn: tInferno, vol: 0.65 }, epic: { bpm: 88, bossBpm: 92, fn: tEpic, vol: 0.89 },
+    voyage: { bpm: 104, fn: tVoyage, vol: 1.1 }, storm: { bpm: 140, bossBpm: 146, fn: tStorm, vol: 0.63 },
+    clock: { bpm: 120, bossBpm: 126, fn: tClock, vol: 0.87 }, blitz: { bpm: 168, fn: tBlitz, vol: 0.52 },
   };
   /* ---------- baked music: each track is rendered once into seamless 8-bar loops (calm / battle / boss),
      then simply played back — no synthesis while you fight, so a busy phone cannot make it stutter ---------- */
@@ -2539,9 +2773,29 @@ const SFX = (() => {
     src.start(t, offs);
     BK.src = src; BK.gain = g; BK.key = BK.track + key; BK.t0 = t - offs; BK.len = buf.duration;
   }
+  // 4.0: a whole arrangement ([[bars, intensity, boss], …]) through the very same music chain, offline.
+  // This is how the HD soundtrack inside the app was made; the game itself only plays the result.
+  function renderSong(id, plan, sr, tail, raw) {
+    const tr = TR[id], q = []; let tt = 0.05;
+    for (const [bars, I, B] of plan) { const d16 = 60 / bpmOf(id, B) / 4; for (let i = 0; i < bars * 16; i++) { q.push([tt, d16, I, B]); tt += d16; } }
+    const off = new OfflineAudioContext(2, Math.ceil((tt + (tail || 3)) * sr), sr);
+    const save = [ac, RB, duckG, delayNodes, musTrim];
+    try {
+      const trim = off.createGain(); trim.gain.value = tr.vol || 1;
+      const mc = off.createDynamicsCompressor(); mc.threshold.value = -24; mc.knee.value = 14; mc.ratio.value = 3.2; mc.attack.value = 0.006; mc.release.value = 0.25;
+      const mk = off.createGain(); mk.gain.value = MUS_MAKEUP;
+      if (raw) { trim.gain.value = 1; trim.connect(off.destination); } else { trim.connect(mc); mc.connect(mk); mk.connect(off.destination); }
+      const gr = musicGraph(off, trim);
+      ac = off; RB = gr.RB; duckG = gr.duckG; delayNodes = gr.delayNodes; musTrim = trim; baking = true;
+      for (const dn of gr.delayNodes) dn.delayTime.value = Math.min(1.9, q[0][1] * 3);
+      for (let s = 0; s < q.length; s++) tr.fn(128 + s, q[s][0], q[s][1], q[s][2], q[s][3]);
+    } finally { [ac, RB, duckG, delayNodes, musTrim] = save; baking = false; }
+    return off.startRendering().then((b) => ({ buf: b, len: tt }));
+  }
   let lastBpm = 0;
   function tick() {
     if (!live() || !musicOn) return;
+    if (HDM.sync(track, boss)) { if (BK.src) stopBaked(0.5); return; } // 4.0: the HD soundtrack plays instead of the synthesizer
     if (BK.track !== track) { stopBaked(0.4); wantBake(track); }
     const vk = vkey(intensity, boss), buf = BK.bufs[vk];
     if (buf) { playBaked(vk, buf); return; }
@@ -2558,13 +2812,13 @@ const SFX = (() => {
     musicStart() {
       want = true;
       if (!ac) return;
-      if (SPOT.active() || EXTM.active()) { musicOn = false; clearInterval(timer); timer = null; stopBaked(0.3); MYMUS.pause(); return; }
-      if (MYMUS.active()) { musicOn = false; clearInterval(timer); timer = null; stopBaked(0.3); MYMUS.play(); return; }
+      if (SPOT.active() || EXTM.active()) { musicOn = false; clearInterval(timer); timer = null; stopBaked(0.3); HDM.stop(); MYMUS.pause(); return; }
+      if (MYMUS.active()) { musicOn = false; clearInterval(timer); timer = null; stopBaked(0.3); HDM.stop(); MYMUS.play(); return; }
       MYMUS.pause();
       if (musicOn) return;
       musicOn = true; nextT = ac.currentTime + 0.06; step = 0; clearInterval(timer); timer = setInterval(tick, 50);
     },
-    musicStop() { want = false; musicOn = false; clearInterval(timer); timer = null; if (ac) stopBaked(0.3); MYMUS.pause(); },
+    musicStop() { want = false; musicOn = false; clearInterval(timer); timer = null; if (ac) stopBaked(0.3); HDM.stop(); MYMUS.pause(); },
     refreshMusic() { if (want) SFX.musicStart(); },
     _bk: () => ({ track: BK.track, keys: Object.keys(BK.bufs), playing: BK.key, busy: BK.busy, q: BK.queue.length }),
     ctx: () => ac, musicBus: () => musBus, musVol: () => musVol, wantsMusic: () => want,
@@ -2574,7 +2828,7 @@ const SFX = (() => {
     duck(v) { musVol = v; applyVol(); },
     get on() { return !!ac; },
     _t(n, a) { return S[n](a); }, _names: () => Object.keys(S), _state: () => ac && ac.state,
-    _sched(id, s, I, B) { const tr = TR[id]; tr.fn(s, ac.currentTime + 0.05, 60 / tr.bpm / 4, I, B); }, _tracks: () => Object.keys(TR),
+    _sched(id, s, I, B) { const tr = TR[id]; tr.fn(s, ac.currentTime + 0.05, 60 / tr.bpm / 4, I, B); }, _tracks: () => Object.keys(TR), _song: renderSong, _tr: (id) => TR[id],
     _probe(w, k) {
       const a = ac.createAnalyser(); a.fftSize = 2048; let src = w === 'sfx' ? sfxBus : w === 'out' ? outNode : musBus;
       if (k) { const h = ac.createBiquadFilter(); h.type = 'highpass'; h.frequency.value = 90; h.Q.value = 0.5; const sh = ac.createBiquadFilter(); sh.type = 'highshelf'; sh.frequency.value = 1500; sh.gain.value = 4; src.connect(h); h.connect(sh); src = sh; }
@@ -3237,9 +3491,10 @@ function enemySil(g, shape, r) {
     case 'shield':
       g.moveTo(r * 1.08, 0); g.quadraticCurveTo(r * 0.95, r * 0.7, r * 0.45, r * 0.95); g.lineTo(-r * 0.7, r * 0.95);
       g.quadraticCurveTo(-r * 1.2, 0, -r * 0.7, -r * 0.95); g.lineTo(r * 0.45, -r * 0.95); g.quadraticCurveTo(r * 0.95, -r * 0.7, r * 1.08, 0); g.closePath(); break;
-    default: g.arc(0, 0, r, 0, TAU);
+    default: if (SIL4[shape]) SIL4[shape](g, r); else g.arc(0, 0, r, 0, TAU);
   }
 }
+const SIL4 = {}, DET4 = {}; // 4.0: silhouettes and details of the new enemies
 const SPR_EXT = { tri: 1.26, dia: 1.46, sq: 0.95, eye: 1.34, hex: 1.02, spike: 1.15, ghost: 1.2, pod: 1.1, node: 1.02, seg: 1.02, cross: 1.02, needle: 1.72, shield: 1.1 };
 function enemySprite(shape, col, r, variant) {
   const key = shape + col + r + variant;
@@ -3734,6 +3989,7 @@ function recalc() {
   if (G.daily === 'glass') { P.might *= 2; maxHp *= 0.5; }
   if (G.daily === 'sprint') P.speed *= 1.15;
   if (G.daily === 'storm') P.xpMul *= 2;
+  maxHp = recalc40(P, pl, R, maxHp);
   maxHp = Math.round(maxHp);
   const oldMax = P.maxHp;
   P.maxHp = maxHp;
@@ -4155,7 +4411,12 @@ const WFIRE = {
 };
 function updateWeapons(dt) {
   const k = (G.pw.rage > 0 ? 1.35 : 1) * (G.avatarT > 0 ? 1.5 : 1);
-  for (const w of G.weapons) WFIRE[w.id](w, wstat(w), dt * k);
+  const echo = G.P.echo || 0;
+  for (const w of G.weapons) {
+    const c0 = w.cd;
+    WFIRE[w.id](w, wstat(w), dt * k);
+    if (echo && w.cd > c0 + 0.05 && Math.random() < echo) w.cd = Math.min(w.cd, 0.1); // 4.0 «Эхо»: fires again at once
+  }
 }
 /* 2.4: freezing (Стужа, «Заморозка», «Стоп-время»): frozen enemies stand still, can't hurt you and take +25% damage */
 function freezeE(e, t, shatter) {
@@ -4486,6 +4747,7 @@ function damageEnemy(e, dmg, src, o) {
   if (G.chronoT > 0) dmg *= 1.3;
   if (tgt.frozen > 0) dmg *= 1.25;
   if ((tgt.boss || tgt.node) && metaLv('hunter')) dmg *= 1 + 0.15 * metaLv('hunter');
+  if (G.P.focus && (tgt.boss || tgt.node || tgt.elite)) dmg *= 1 + G.P.focus;
   const dealt = Math.min(dmg, Math.max(0, tgt.hp));
   G.dmgBy[src] = (G.dmgBy[src] || 0) + dealt;
   G.dmgAll += dealt;
@@ -4541,6 +4803,7 @@ function onDeath(e) {
   else if (r < 0.0207 * L) dropPick('magnet', e.x, e.y);
   else if (r < 0.0212 * L) dropPick('pw', e.x, e.y, { pw: pickPower() });
   if (e.elite) { dropPick('chest', e.x, e.y); G.shake = Math.min(1, G.shake + 0.25); G.shards += 3; if (e.aff === 'volatile') volatileMine(e); if (Math.random() < 0.18 * L) dropPick('pw', e.x + 18, e.y, { pw: pickPower() }); }
+  onDeath40(e);
   const big = e.r >= 15;
   killFx(e, big);
   SFX.play('kill', big);
@@ -5197,6 +5460,7 @@ function checkUnlocks() {
     else if (u.k === 'wins') ok = SAVE.tot.wins >= u.v;
     else if (u.k === 'diffwin') ok = !!(SAVE.diffWin[2] || SAVE.diffWin[3] || SAVE.diffWin[4]);
     else if (u.k === 'rush') ok = (SAVE.best.rush | 0) >= u.v;
+    else if (u.k === 'stage') ok = (SAVE.stage.best | 0) >= u.v;
     if (ok) { SAVE.chars[c.id] = 1; out.push(c); }
   }
   if (SAVE.tot.wins > 0 && !SAVE.nmUnlocked) { SAVE.nmUnlocked = 1; out.push({ diff: 3 }); }
@@ -6269,6 +6533,7 @@ function drawBackground(t, camx, camy) {
   buildStars(th);
   const ow = cw * 0.035, oh = ch * 0.035;
   ctx.drawImage(backdrop, -ow + Math.sin(t * 0.05) * ow * 0.8, -oh + Math.cos(t * 0.04) * oh * 0.8, cw + ow * 2, ch + oh * 2);
+  hdBackdrop(th, t, camx, camy, cw, ch, st);
   if (th.galaxy) {
     const gt = buildGalaxy(), sz = Math.min(cw, ch) * 1.05;
     ctx.globalCompositeOperation = 'lighter'; ctx.globalAlpha = 0.85;
@@ -6693,7 +6958,7 @@ function drawShots() {
   ctx.globalCompositeOperation = 'lighter';
   for (const s of G.shots) {
     const X = sxw(s.x), Y = syw(s.y);
-    if (s.k !== 'ring' && s.k !== 'slash' && !onScreen(X, Y, s.k === 'hole' ? 260 : s.k === 'ustar' ? 700 : s.k === 'meteor' ? 240 : s.k === 'fire' ? 140 : 60)) continue;
+    if (s.k !== 'ring' && s.k !== 'slash' && !onScreen(X, Y, s.k === 'hole' ? 260 : s.k === 'ustar' ? 700 : s.k === 'meteor' ? 240 : s.k === 'fire' ? 140 : s.k === 'cloud' ? 220 : 60)) continue;
     switch (s.k) {
       case 'shard': {
         const c = Math.cos(s.ang), sn = Math.sin(s.ang), L = (s.evo ? 13 : 11) * Z, w = (s.evo ? 5 : 4.2) * Z;
@@ -6838,6 +7103,7 @@ function drawShots() {
         ctx.strokeStyle = '#ffffff'; ctx.lineWidth = 2 * Z; ctx.globalAlpha = 0.7 * (1 - k); ctx.stroke();
         break;
       }
+      default: { const f = SHOT4_DRAW[s.k]; if (f) f(s, X, Y); }
     }
   }
   ctx.globalAlpha = 1;
@@ -7152,6 +7418,7 @@ function render() {
   drawEnemies();
   drawBoss();
   drawWeaponFx();
+  draw40Weapons();
   drawShots();
   drawEBullets();
   drawPlayer();
@@ -8270,6 +8537,14 @@ function renderSettingsKeep() {
   if (sc) sc.scrollTop = top;
 }
 function fmtMb(b) { return (b / 1048576).toFixed(b < 10485760 ? 1 : 0) + ' МБ'; }
+/* 4.0: with the HD soundtrack a normal run on «Авто» is a playlist — when a composition ends, another one follows */
+HDM.onEnd = (kind) => {
+  if (kind !== 'run' || !G || G.stg || G.boss || G.blitz || (STATE !== 'play' && STATE !== 'levelup' && STATE !== 'pause' && STATE !== 'chest')) return false;
+  const sel = SAVE.set.track; if (sel && sel !== 'auto') return false;
+  const pool = RUN_TRACKS.filter((id) => id !== G.runTrack && HDM.has(id)); if (!pool.length) return false;
+  G.runTrack = pick(pool); applyMusicContext();
+  return true;
+};
 function applyMusicContext() {
   const ctxName = G && (STATE === 'play' || STATE === 'levelup' || STATE === 'pause' || STATE === 'chest') ? (G.boss ? 'boss' : 'run') : 'menu';
   SFX.setTrack(musicFor(ctxName));
@@ -8515,6 +8790,12 @@ function renderSettings() {
   slider('Громкость звуков', 'sv');
   tog('Музыка', 'music', () => { SFX.applyVol(); if (SAVE.set.music) SFX.musicStart(); else MYMUS.pause(); });
   slider('Громкость музыки', 'mv');
+  if (HD.ready) {
+    const hi = HD.info();
+    L.appendChild(el('div', 'lbl', 'HD-ПАКЕТ'));
+    tog('HD-саундтрек (' + hi.music + ' композиций)', 'hdmus', () => { SFX.refreshMusic(); });
+    tog('HD-фоны (' + hi.bg + ' туманностей)', 'hdbg', () => { FRZ.dirty = true; });
+  }
   L.appendChild(el('div', 'lbl', 'МУЗЫКА'));
   for (const tr of TRACKS_UI) {
     const on = (SAVE.set.track || 'auto') === tr.id || (tr.id === 'auto' && SAVE.set.track === 'custom' && !MYMUS.has());
@@ -10371,6 +10652,371 @@ function initUI25() {
   });
 }
 
+/* ================= 4.0 «СВЕРХНОВАЯ»: new weapons, passives and heroes ================= */
+Object.assign(ICONS, {
+  drone: '<circle cx="12" cy="12" r="3.2" fill="currentColor"/><path d="M4 8c2.4-3 5.6-3 8 0M20 8c-2.4-3-5.6-3-8 0"/><path d="M5 16.5c2 2.2 5 2.2 7 0M19 16.5c-2 2.2-5 2.2-7 0" opacity=".6"/>',
+  mine: '<circle cx="12" cy="12" r="5.2"/><circle cx="12" cy="12" r="1.7" fill="currentColor"/><path d="M12 2.5v3M12 18.5v3M2.5 12h3M18.5 12h3M5.3 5.3l2.1 2.1M16.6 16.6l2.1 2.1M18.7 5.3l-2.1 2.1M7.4 16.6l-2.1 2.1"/>',
+  rico: '<path d="M3 17l6-9 5 6 7-9"/><circle cx="21" cy="5" r="1.8" fill="currentColor"/><circle cx="9" cy="8" r="1.3" fill="currentColor"/><circle cx="14" cy="14" r="1.3" fill="currentColor"/>',
+  toxin: '<path d="M9 3h6M10 3v5.5L5.5 17a3 3 0 0 0 2.7 4.5h7.6a3 3 0 0 0 2.7-4.5L14 8.5V3"/><circle cx="10" cy="16" r="1.2" fill="currentColor"/><circle cx="13.6" cy="18" r=".9" fill="currentColor"/><path d="M7.6 13.5h8.8" opacity=".6"/>',
+  focus: '<circle cx="12" cy="12" r="8.5" opacity=".5"/><circle cx="12" cy="12" r="4.5"/><circle cx="12" cy="12" r="1.3" fill="currentColor"/><path d="M12 1.5v4M12 18.5v4M1.5 12h4M18.5 12h4"/>',
+  echo: '<circle cx="12" cy="12" r="1.7" fill="currentColor"/><path d="M8 12a4 4 0 0 1 4-4M4 12a8 8 0 0 1 8-8"/><path d="M16 12a4 4 0 0 1-4 4M20 12a8 8 0 0 1-8 8" opacity=".65"/>',
+  barrier: '<path d="M12 2.5l8 3v6c0 5-3.5 8.5-8 10-4.5-1.5-8-5-8-10v-6z"/><path d="M12 7.5v8M8 11.5h8" opacity=".8"/>',
+});
+Object.assign(C, { drone: '#d4ff5a', mine: '#ff6a3d', rico: '#5ab8ff', toxin: '#a6ff4d' });
+const CI_DRONE = pcol(C.drone), CI_MINE = pcol(C.mine), CI_RICO = pcol(C.rico), CI_TOX = pcol(C.toxin);
+
+WEAPONS.drone = {
+  name: 'Светлячки', desc: 'Дроны-светлячки летают рядом и сами расстреливают врагов', evoWith: 'echo',
+  evoName: 'Эскадрилья', evoDesc: 'Пять дронов бьют без передышки, а их выстрелы пробивают насквозь',
+  lv: [
+    { n: 1, dmg: 9, cd: 0.62, range: 300, spd: 560 },
+    { n: 1, dmg: 13, cd: 0.62, range: 300, spd: 560 },
+    { n: 2, dmg: 13, cd: 0.62, range: 320, spd: 580 },
+    { n: 2, dmg: 16, cd: 0.54, range: 320, spd: 600 },
+    { n: 3, dmg: 16, cd: 0.54, range: 340, spd: 620 },
+    { n: 3, dmg: 20, cd: 0.46, range: 360, spd: 640 },
+  ],
+  up: ['', 'Урон +4', '+1 дрон', 'Урон +3, стреляют чаще', '+1 дрон', 'Урон +4, стреляют чаще'],
+  evo: { n: 5, dmg: 24, cd: 0.36, range: 400, spd: 720, pierce: 2 },
+};
+WEAPONS.mine = {
+  name: 'Мины', desc: 'Оставляет мины: взрываются, как только рядом окажется враг', evoWith: 'barrier',
+  evoName: 'Минное поле', evoDesc: 'Мины взрываются дважды и разбрасывают осколочные заряды',
+  lv: [
+    { cd: 1.7, n: 1, dmg: 34, rad: 54, cap: 6 },
+    { cd: 1.7, n: 1, dmg: 46, rad: 54, cap: 6 },
+    { cd: 1.7, n: 2, dmg: 46, rad: 58, cap: 8 },
+    { cd: 1.45, n: 2, dmg: 54, rad: 62, cap: 10 },
+    { cd: 1.45, n: 2, dmg: 68, rad: 66, cap: 10 },
+    { cd: 1.25, n: 3, dmg: 74, rad: 72, cap: 14 },
+  ],
+  up: ['', 'Урон +12', '+1 мина', 'Чаще, взрыв шире', 'Урон +14', '+1 мина, чаще'],
+  evo: { cd: 1.05, n: 3, dmg: 92, rad: 80, cap: 18, cluster: 4, twice: 1 },
+};
+WEAPONS.rico = {
+  name: 'Рикошет', desc: 'Звезда отскакивает от врага к врагу', evoWith: 'luck',
+  evoName: 'Шальная звезда', evoDesc: 'Скачет без устали, а каждый отскок взрывается',
+  lv: [
+    { cd: 1.35, n: 1, dmg: 14, bounce: 3, spd: 520, range: 230 },
+    { cd: 1.35, n: 1, dmg: 18, bounce: 4, spd: 520, range: 230 },
+    { cd: 1.35, n: 2, dmg: 18, bounce: 4, spd: 540, range: 240 },
+    { cd: 1.15, n: 2, dmg: 22, bounce: 5, spd: 560, range: 250 },
+    { cd: 1.15, n: 2, dmg: 28, bounce: 6, spd: 580, range: 260 },
+    { cd: 1.0, n: 3, dmg: 31, bounce: 7, spd: 600, range: 270 },
+  ],
+  up: ['', 'Урон +4, +1 отскок', '+1 звезда', 'Урон +4, чаще, +1 отскок', 'Урон +6, +1 отскок', '+1 звезда, чаще, +1 отскок'],
+  evo: { cd: 0.85, n: 3, dmg: 38, bounce: 14, spd: 680, range: 320, burst: 1 },
+};
+WEAPONS.toxin = {
+  name: 'Токсин', desc: 'Бросает колбы: ядовитое облако травит и замедляет всех внутри', evoWith: 'focus',
+  evoName: 'Чума', evoDesc: 'Огромные облака, а погибшие в них враги оставляют новые',
+  lv: [
+    { cd: 2.9, n: 1, dps: 15, r: 60, dur: 3.0, slow: 0.2 },
+    { cd: 2.9, n: 1, dps: 21, r: 60, dur: 3.0, slow: 0.2 },
+    { cd: 2.9, n: 2, dps: 21, r: 64, dur: 3.2, slow: 0.25 },
+    { cd: 2.5, n: 2, dps: 27, r: 70, dur: 3.4, slow: 0.25 },
+    { cd: 2.5, n: 2, dps: 35, r: 74, dur: 3.6, slow: 0.3 },
+    { cd: 2.2, n: 3, dps: 39, r: 82, dur: 3.8, slow: 0.3 },
+  ],
+  up: ['', 'Урон +40%', '+1 колба', 'Чаще, облако шире', 'Урон +30%', '+1 колба, чаще, шире'],
+  evo: { cd: 1.9, n: 3, dps: 54, r: 100, dur: 4.2, slow: 0.45, spread: 1 },
+};
+Object.assign(PASSIVES, {
+  focus:   { name: 'Фокус',  max: 5, desc: '+12% урона по боссам и элите' },
+  echo:    { name: 'Эхо',    max: 5, desc: '7% шанс, что оружие тут же сработает ещё раз' },
+  barrier: { name: 'Барьер', max: 5, desc: 'Щит на один удар. Сам восстанавливается — с каждым уровнем быстрее' },
+});
+const BARRIER_CD = [0, 30, 26, 22, 18, 14];
+
+WFIRE.drone = (w, s, dt) => {
+  const P = G.P, n = s.n + P.proj;
+  if (!w.dr) w.dr = [];
+  while (w.dr.length < n) w.dr.push({ x: P.x, y: P.y, cd: rnd(0.1, s.cd), ph: rnd(TAU), fl: 0 });
+  w.dr.length = n; w.n = n;
+  w.ang += dt * 1.3;
+  const f = 1 - Math.exp(-dt * 9);
+  for (let k = 0; k < n; k++) {
+    const d = w.dr[k], a = w.ang + (k / n) * TAU, R = 34 + 7 * Math.sin(G.t * 2.1 + d.ph);
+    d.x += (P.x + Math.cos(a) * R - d.x) * f; d.y += (P.y + Math.sin(a) * R - d.y) * f;
+    if (d.fl > 0) d.fl -= dt;
+    d.cd -= dt;
+    if (d.cd > 0) continue;
+    const t = pickTarget(d.x, d.y, s.range);
+    if (!t) { d.cd = 0.12; continue; }
+    d.cd = P.echo && Math.random() < P.echo ? 0.09 : s.cd * P.cdMul * rnd(0.9, 1.1);
+    const ang = angTo(d.x, d.y, t.x, t.y);
+    G.shots.push({ k: 'bolt', x: d.x, y: d.y, vx: Math.cos(ang) * s.spd, vy: Math.sin(ang) * s.spd, r: 4, dmg: s.dmg * P.might, pierce: s.pierce || 0, life: 0.75,
+      ci: w.evo ? CI_WHITE : CI_DRONE, src: 'drone', hit: [], evo: w.evo, dead: false });
+    d.fl = 0.12;
+    SFX.play('shoot');
+  }
+};
+WFIRE.mine = (w, s, dt) => {
+  w.cd -= dt; if (w.cd > 0) return;
+  const P = G.P;
+  let alive = 0; for (const q of G.shots) if (q.k === 'mine' && !q.dead) alive++;
+  if (alive >= s.cap + P.proj * 2) { w.cd = 0.25; return; }
+  w.cd = s.cd * P.cdMul;
+  const n = s.n + P.proj;
+  for (let k = 0; k < n; k++) {
+    // the first one drops at your feet, the others are tossed toward the swarm
+    let tx = P.x + rnd(-10, 10), ty = P.y + rnd(-10, 10);
+    if (k > 0) { const t = pickTarget(P.x, P.y, 260), a = t ? angTo(P.x, P.y, t.x, t.y) + rnd(-0.7, 0.7) : rnd(TAU), d = rnd(60, 130); tx = P.x + Math.cos(a) * d; ty = P.y + Math.sin(a) * d; }
+    G.shots.push({ k: 'mine', x: P.x, y: P.y, sx: P.x, sy: P.y, tx, ty, fly: 0, arm: 0.45, life: 9, rad: s.rad * P.area, trig: 30, dmg: s.dmg * P.might,
+      cluster: s.cluster || 0, twice: s.twice || 0, src: 'mine', evo: w.evo, ph: rnd(TAU), dead: false });
+  }
+  SFX.play('pick');
+};
+function mineBlast(x, y, s) {
+  aoe(x, y, s.rad, s.dmg, 'mine', { kb: 200, ring: C.mine, size: 0.9 });
+  if (s.twice) G.timers.push({ t: 0.22, fn: () => { if (G) aoe(x, y, s.rad * 0.8, s.dmg * 0.6, 'mine', { kb: 120, ring: '#ffd34d', size: 0.7, quietSnd: true }); } });
+  for (let i = 0; i < s.cluster; i++) { const a = rnd(TAU), v = rnd(160, 300); G.shots.push({ k: 'bomblet', x, y, vx: Math.cos(a) * v, vy: Math.sin(a) * v, life: rnd(0.3, 0.55), rad: s.rad * 0.5, dmg: s.dmg * 0.35, src: 'mine', dead: false }); }
+}
+SHOT.mine = (s, dt) => {
+  if (s.fly < 1) { s.fly = Math.min(1, s.fly + dt / 0.28); const k = easeOut(s.fly); s.x = s.sx + (s.tx - s.sx) * k; s.y = s.sy + (s.ty - s.sy) * k; return; }
+  s.arm -= dt; s.life -= dt;
+  let boom = s.life <= 0;
+  if (!boom && s.arm <= 0) {
+    gridQuery(s.x, s.y, s.trig + 20, QA);
+    for (const e of QA) { if (e.dead || e.invuln || e.pod) continue; const rr = s.trig + e.r; if (dist2(s.x, s.y, e.x, e.y) < rr * rr) { boom = true; break; } }
+  }
+  if (!boom) return;
+  s.dead = true;
+  mineBlast(s.x, s.y, s);
+};
+WFIRE.rico = (w, s, dt) => {
+  w.cd -= dt; if (w.cd > 0) return;
+  const P = G.P, t = pickTarget(P.x, P.y, 430);
+  if (!t) { w.cd = 0.12; return; }
+  w.cd = s.cd * P.cdMul;
+  const n = s.n + P.proj, base = angTo(P.x, P.y, t.x, t.y);
+  for (let k = 0; k < n; k++) {
+    const a = base + (k - (n - 1) / 2) * 0.35;
+    G.shots.push({ k: 'rico', x: P.x, y: P.y, vx: Math.cos(a) * s.spd, vy: Math.sin(a) * s.spd, spd: s.spd, tgt: k === 0 ? t : null, left: s.bounce, range: s.range * Math.sqrt(P.area),
+      dmg: s.dmg * P.might, burst: s.burst || 0, hit: [], life: 1.1, wait: 0, spin: rnd(TAU), src: 'rico', evo: w.evo, r: 6, dead: false });
+  }
+  SFX.play('glaive');
+};
+SHOT.rico = (s, dt) => {
+  s.life -= dt; s.spin += dt * 14;
+  if (s.life <= 0) { s.dead = true; return; }
+  if (s.tgt && (s.tgt.dead || s.tgt.invuln)) s.tgt = null;
+  if (s.tgt) { // turns hard toward the enemy it has picked
+    const ca = Math.atan2(s.vy, s.vx), na = ca + clamp(angDiff(ca, angTo(s.x, s.y, s.tgt.x, s.tgt.y)), -14 * dt, 14 * dt);
+    s.vx = Math.cos(na) * s.spd; s.vy = Math.sin(na) * s.spd;
+  }
+  s.x += s.vx * dt; s.y += s.vy * dt;
+  if (s.wait > 0) { s.wait -= dt; return; }
+  gridQuery(s.x, s.y, s.r + 2, QA);
+  for (const e of QA) {
+    if (e.dead || e.invuln) continue;
+    const key = e.parent || e;
+    if (s.hit.includes(key.id)) continue;
+    const rr = e.r + s.r; if (dist2(s.x, s.y, e.x, e.y) > rr * rr) continue;
+    damageEnemy(e, s.dmg, 'rico', { kb: 60, fx: s.x - s.vx, fy: s.y - s.vy });
+    hitSpark(s.x, s.y, CI_RICO, s.vx, s.vy);
+    if (s.burst) aoe(s.x, s.y, 40 * G.P.area, s.dmg * 0.45, 'rico', { kb: 80, ring: C.rico, size: 0.5, quietSnd: true });
+    s.hit.push(key.id); if (s.hit.length > 3) s.hit.shift(); // may come back to an enemy after a few others
+    if (s.left-- <= 0) { s.dead = true; return; }
+    // the next one: the nearest enemy it has not just hit
+    gridQuery(s.x, s.y, s.range, QB);
+    let best = null, bd = s.range * s.range;
+    for (const q of QB) { if (!targetable(q)) continue; if (s.hit.includes((q.parent || q).id)) continue; const d = dist2(s.x, s.y, q.x, q.y); if (d < bd) { bd = d; best = q; } }
+    if (!best && (key.boss || key.node || key.elite) && !key.dead) { // nobody else around a big one: swing round and hit it again
+      s.hit.length = 0; s.wait = 0.2; s.tgt = e; s.vx = -s.vx; s.vy = -s.vy; s.life = 1.1; return;
+    }
+    if (!best) { s.dead = true; burst(s.x, s.y, 5, CI_RICO, 140, 0.3, 2.4, 1); return; }
+    s.tgt = best; s.life = 1.1;
+    const a = angTo(s.x, s.y, best.x, best.y); s.vx = Math.cos(a) * s.spd; s.vy = Math.sin(a) * s.spd;
+    return;
+  }
+};
+WFIRE.toxin = (w, s, dt) => {
+  w.cd -= dt; if (w.cd > 0) return;
+  const P = G.P, cands = enemiesNear(P.x, P.y, 300, QC);
+  if (!cands.length) { w.cd = 0.25; return; }
+  w.cd = s.cd * P.cdMul;
+  const n = s.n + P.proj, bt = bossTarget(P.x, P.y, 320);
+  for (let k = 0; k < n; k++) {
+    const t = bt && k === 0 ? bt : cands[(Math.random() * cands.length) | 0];
+    G.shots.push({ k: 'flask', x: P.x, y: P.y, sx: P.x, sy: P.y, tx: t.x + rnd(-14, 14), ty: t.y + rnd(-14, 14), fly: -k * 0.3, r: s.r * P.area, dps: s.dps * P.might, dur: s.dur,
+      slow: s.slow, spread: s.spread || 0, src: 'toxin', evo: w.evo, dead: false });
+  }
+  SFX.play('launch');
+};
+function spawnCloud(x, y, r, dps, dur, slow, spread, evo) {
+  let n = 0; for (const q of G.shots) if (q.k === 'cloud' && !q.dead) n++;
+  if (n >= 24) return;
+  G.shots.push({ k: 'cloud', x, y, r, dps, life: dur, max: dur, slow, spread, tick: 0, src: 'toxin', evo, rot: rnd(TAU), dead: false });
+  burst(x, y, 8, CI_TOX, 150, 0.4, 3, 1);
+}
+SHOT.flask = (s, dt) => {
+  s.fly += dt / 0.42;
+  if (s.fly < 0) { s.x = G.P.x; s.y = G.P.y; s.sx = s.x; s.sy = s.y; return; }
+  const k = Math.min(1, s.fly);
+  s.x = s.sx + (s.tx - s.sx) * k; s.y = s.sy + (s.ty - s.sy) * k;
+  if (k >= 1) { s.dead = true; spawnCloud(s.tx, s.ty, s.r, s.dps, s.dur, s.slow, s.spread, s.evo); SFX.play('frost', 1); }
+};
+SHOT.cloud = (s, dt) => {
+  s.life -= dt; s.rot += dt * 0.5;
+  if (s.life <= 0) { s.dead = true; return; }
+  s.tick -= dt; if (s.tick > 0) return;
+  s.tick = 0.25;
+  gridQuery(s.x, s.y, s.r + 24, QA);
+  const seen = [];
+  for (const e of QA) {
+    if (e.dead || e.invuln) continue;
+    const rr = s.r + e.r * 0.5; if (dist2(s.x, s.y, e.x, e.y) > rr * rr) continue;
+    const key = e.parent || e;
+    if (seen.includes(key)) continue; seen.push(key);
+    if (s.spread) key.plague = G.t + 0.45; // dies while poisoned by «Чума»: leaves a cloud of its own
+    damageEnemy(e, s.dps * 0.25, 'toxin', { noCrit: true, quiet: true });
+    if (!key.dead) slowE(key, s.slow, 0.5);
+  }
+  if (Math.random() < 0.7) emit(s.x + rnd(-s.r, s.r) * 0.6, s.y + rnd(-s.r, s.r) * 0.6, rnd(-20, 20), rnd(-45, -10), 0.6, 4, CI_TOX, 0, 2);
+};
+/* how the new shots look (called from drawShots; blend mode is 'lighter' on entry and must be on exit) */
+const SHOT4_DRAW = {
+  mine(s, X, Y) {
+    const armed = s.fly >= 1 && s.arm <= 0, bl = armed ? (Math.sin(G.rt * 9 + s.ph) > 0.2 ? 1 : 0.25) : 0.4, k = s.fly < 1 ? 1 + Math.sin(s.fly * Math.PI) * 0.7 : 1, r = 5.2 * Z * k;
+    glowAt(CI_MINE, X, Y, 13 * Z * k, 0.35 + 0.45 * bl);
+    ctx.globalCompositeOperation = 'source-over'; ctx.globalAlpha = 1;
+    ctx.fillStyle = '#1a0b08'; ctx.strokeStyle = s.evo ? '#ffd34d' : C.mine; ctx.lineWidth = 1.6 * Z;
+    ctx.beginPath(); ctx.arc(X, Y, r, 0, TAU); ctx.fill(); ctx.stroke();
+    ctx.beginPath();
+    for (let i = 0; i < 4; i++) { const a = s.ph + i * 1.5708, c = Math.cos(a), sn = Math.sin(a); ctx.moveTo(X + c * r, Y + sn * r); ctx.lineTo(X + c * r * 1.55, Y + sn * r * 1.55); }
+    ctx.stroke();
+    ctx.fillStyle = bl > 0.5 ? '#ffffff' : C.mine; ctx.beginPath(); ctx.arc(X, Y, 1.9 * Z * k, 0, TAU); ctx.fill();
+    ctx.globalCompositeOperation = 'lighter';
+  },
+  rico(s, X, Y) {
+    const ci = s.evo ? CI_GOLD : CI_RICO, a = s.spin, c = Math.cos(a) * Z, sn = Math.sin(a) * Z;
+    glowAt(ci, X - s.vx * 0.022 * Z, Y - s.vy * 0.022 * Z, 9 * Z, 0.5);
+    glowAt(ci, X, Y, 13 * Z, 0.9);
+    ctx.globalCompositeOperation = 'source-over'; ctx.globalAlpha = 1;
+    ctx.setTransform(c, sn, -sn, c, X, Y);
+    ctx.fillStyle = '#f2fbff'; ctx.beginPath();
+    for (let i = 0; i < 8; i++) { const an = (i / 8) * TAU, rr = i % 2 ? 2.6 : 7; ctx.lineTo(Math.cos(an) * rr, Math.sin(an) * rr); }
+    ctx.closePath(); ctx.fill();
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.globalCompositeOperation = 'lighter';
+  },
+  flask(s, X, Y) {
+    if (s.fly < 0) return;
+    const h = Math.sin(Math.min(1, s.fly) * Math.PI), k = 1 + h * 0.6;
+    glowAt(CI_TOX, X, Y - h * 30 * Z, 9 * Z * k, 0.9); glowAt(CI_WHITE, X, Y - h * 30 * Z, 3.2 * Z * k, 0.9);
+  },
+  cloud(s, X, Y) {
+    const a = 0.55 * Math.min(1, (s.max - s.life) / 0.3) * Math.min(1, s.life / 0.5), R = s.r * Z;
+    for (let i = 0; i < 5; i++) { const an = s.rot + i * 1.2566; glowAt(CI_TOX, X + Math.cos(an) * R * 0.42, Y + Math.sin(an) * R * 0.42, R * 0.78, a * 0.5); }
+    haloAt(CI_TOX, X, Y, R * 1.15, a * 0.6);
+    ctx.globalAlpha = a * 0.55; ctx.strokeStyle = s.evo ? '#e6ff9a' : C.toxin; ctx.lineWidth = 1.5 * Z;
+    ctx.setLineDash([6 * Z, 7 * Z]); ctx.lineDashOffset = -G.rt * 22 * Z;
+    ctx.beginPath(); ctx.arc(X, Y, R, 0, TAU); ctx.stroke(); ctx.setLineDash([]);
+  },
+};
+function draw40Weapons() {
+  ctx.globalCompositeOperation = 'lighter';
+  for (const w of G.weapons) {
+    if (w.id !== 'drone' || !w.dr) continue;
+    const ci = w.evo ? CI_GOLD : CI_DRONE;
+    ctx.strokeStyle = PAL[ci]; ctx.lineWidth = 1.2 * Z;
+    for (const d of w.dr) {
+      const X = sxw(d.x), Y = syw(d.y), fl = Math.sin(G.rt * 38 + d.ph) * 0.5 + 0.5;
+      glowAt(ci, X, Y, 9.5 * Z, 0.85);
+      glowAt(CI_WHITE, X, Y, (3.2 + (d.fl > 0 ? 2.6 : 0)) * Z, 1);
+      ctx.globalAlpha = 0.6;
+      for (const sd of [-1, 1]) { ctx.beginPath(); ctx.ellipse(X + sd * 4.2 * Z, Y - 2.2 * Z, 4.6 * Z, (0.8 + fl * 2.2) * Z, sd * 0.5, 0, TAU); ctx.stroke(); }
+    }
+  }
+  ctx.globalAlpha = 1;
+}
+
+/* ---------- four new heroes ---------- */
+CHARS.push(
+  { id: 'pleiad', name: 'Плеяда', color: '#d4ff5a', weapon: 'drone', mods: { cd: 0.05, magnet: 0.2 }, md: '−5% перезарядка, +20% сбор',
+    unlock: { k: 'stage', v: 12, txt: 'Пройди 12 уровней' } },
+  { id: 'vulcan', name: 'Вулкан', color: '#ff6a3d', weapon: 'mine', mods: { hp: 30, area: 0.1, speed: -0.05 }, md: '+30 здоровья, +10% размах, чуть медленнее',
+    unlock: { k: 'boss', v: 'colossus', txt: 'Победи Колосса' } },
+  { id: 'pulsar', name: 'Пульсар', color: '#5ab8ff', weapon: 'rico', mods: { crit: 0.06, speed: 0.08 }, md: '+6% шанс крита, +8% скорость',
+    unlock: { k: 'level', v: 30, txt: 'Достигни 30 уровня' } },
+  { id: 'spore', name: 'Спора', color: '#a6ff4d', weapon: 'toxin', mods: { regen: 0.35, hp: 10 }, md: 'Регенерация, +10 здоровья',
+    unlock: { k: 'boss', v: 'specter', txt: 'Победи Призрака' } },
+);
+CHARS.forEach((c) => pcol(c.color));
+{
+  const body = (c, a) => rgba(mixHex(c, '#05060b', 0.55), a === undefined ? 0.92 : a), lite = (c, k) => mixHex(c, '#ffffff', k === undefined ? 0.45 : k);
+  const core = (g, X, Y, z, ci, r, k) => { g.globalCompositeOperation = 'lighter'; gAt(g, ci, X, Y, r * (k || 2.6) * z, 1); g.globalCompositeOperation = 'source-over'; g.globalAlpha = 1; };
+  const hot = (g, x, y, rr, white) => { g.fillStyle = white; g.beginPath(); g.arc(x, y, rr, 0, TAU); g.fill(); };
+  // Плеяда: a small star cluster — six stars circle a bright heart
+  HERO_FORM.pleiad = (g, X, Y, z, c, ci, t, white, fa, r) => {
+    core(g, X, Y, z, ci, r, 2.5);
+    g.setTransform(z, 0, 0, z, X, Y);
+    g.strokeStyle = rgba(c, 0.45); g.lineWidth = 0.9; g.beginPath(); g.arc(0, 0, r * 1.38, 0, TAU); g.stroke();
+    for (let i = 0; i < 6; i++) {
+      const a = t * 1.4 + (i / 6) * TAU, rr = r * (1.38 + 0.12 * Math.sin(t * 3 + i * 1.7)), x = Math.cos(a) * rr, y = Math.sin(a) * rr, s = r * (i % 2 ? 0.17 : 0.24);
+      g.fillStyle = i % 2 ? white : lite(c, 0.5);
+      g.beginPath(); g.moveTo(x, y - s * 1.7); g.lineTo(x + s * 0.45, y - s * 0.45); g.lineTo(x + s * 1.7, y); g.lineTo(x + s * 0.45, y + s * 0.45);
+      g.lineTo(x, y + s * 1.7); g.lineTo(x - s * 0.45, y + s * 0.45); g.lineTo(x - s * 1.7, y); g.lineTo(x - s * 0.45, y - s * 0.45); g.closePath(); g.fill();
+    }
+    g.beginPath(); g.arc(0, 0, r * 0.78, 0, TAU); g.fillStyle = body(c); g.fill(); g.strokeStyle = c; g.lineWidth = 1.8; g.stroke();
+    hot(g, 0, 0, r * 0.34, white);
+  };
+  // Вулкан: a cracked rock with molten veins
+  HERO_FORM.vulcan = (g, X, Y, z, c, ci, t, white, fa, r) => {
+    core(g, X, Y, z, ci, r, 2.6 + Math.sin(t * 9) * 0.12);
+    g.setTransform(z, 0, 0, z, X, Y); g.rotate(t * 0.5);
+    g.beginPath(); for (let i = 0; i < 7; i++) { const a = (i / 7) * TAU, rr = r * (1.12 + (i % 2 ? 0.16 : -0.04)); g.lineTo(Math.cos(a) * rr, Math.sin(a) * rr); } g.closePath();
+    g.fillStyle = body(c, 0.95); g.fill(); g.strokeStyle = c; g.lineWidth = 2; g.stroke();
+    g.strokeStyle = white; g.lineWidth = 1.1; g.globalAlpha = 0.6 + 0.4 * Math.sin(t * 6);
+    g.beginPath(); g.moveTo(-r * 0.7, -r * 0.2); g.lineTo(-r * 0.15, r * 0.05); g.lineTo(r * 0.1, -r * 0.45); g.moveTo(-r * 0.15, r * 0.05); g.lineTo(r * 0.2, r * 0.6);
+    g.moveTo(r * 0.1, -r * 0.45); g.lineTo(r * 0.7, -r * 0.15); g.stroke();
+    g.globalAlpha = 1; g.setTransform(z, 0, 0, z, X, Y); hot(g, 0, 0, r * 0.3, white);
+  };
+  // Пульсар: a spinning star with two lighthouse beams
+  HERO_FORM.pulsar = (g, X, Y, z, c, ci, t, white, fa, r) => {
+    core(g, X, Y, z, ci, r, 2.5);
+    g.setTransform(z, 0, 0, z, X, Y); g.rotate(t * 2.6);
+    g.globalCompositeOperation = 'lighter';
+    for (const s of [1, -1]) {
+      const gr = g.createLinearGradient(0, 0, s * r * 2.3, 0); gr.addColorStop(0, rgba(c, 0.85)); gr.addColorStop(1, rgba(c, 0));
+      g.fillStyle = gr; g.beginPath(); g.moveTo(0, -r * 0.3); g.lineTo(s * r * 2.3, -r * 0.08); g.lineTo(s * r * 2.3, r * 0.08); g.lineTo(0, r * 0.3); g.closePath(); g.fill();
+    }
+    g.globalCompositeOperation = 'source-over';
+    g.setTransform(z, 0, 0, z, X, Y);
+    g.beginPath(); g.arc(0, 0, r * 0.9, 0, TAU); g.fillStyle = body(c); g.fill(); g.strokeStyle = c; g.lineWidth = 1.9; g.stroke();
+    g.strokeStyle = lite(c, 0.6); g.lineWidth = 1; g.beginPath(); g.ellipse(0, 0, r * 1.45, r * 0.42, t * 0.9, 0, TAU); g.stroke();
+    hot(g, 0, 0, r * 0.36, white);
+  };
+  // Спора: a living pod, spores drift away from it
+  HERO_FORM.spore = (g, X, Y, z, c, ci, t, white, fa, r) => {
+    core(g, X, Y, z, ci, r, 2.5);
+    g.setTransform(z, 0, 0, z, X, Y);
+    for (let i = 0; i < 5; i++) { const k = (t * 0.5 + i / 5) % 1, a = i * 2.4 + t * 0.4, rr = r * (0.9 + k * 1.1); g.globalAlpha = (1 - k) * 0.85; g.fillStyle = lite(c, 0.4); g.beginPath(); g.arc(Math.cos(a) * rr, Math.sin(a) * rr, r * (0.2 - k * 0.1), 0, TAU); g.fill(); }
+    g.globalAlpha = 1;
+    g.beginPath(); for (let i = 0; i <= 24; i++) { const a = (i / 24) * TAU, rr = r * (1 + 0.1 * Math.sin(a * 6 + t * 3)); g.lineTo(Math.cos(a) * rr, Math.sin(a) * rr); } g.closePath();
+    g.fillStyle = body(c); g.fill(); g.strokeStyle = c; g.lineWidth = 1.9; g.stroke();
+    for (let i = 0; i < 3; i++) { const a = t * 0.8 + (i / 3) * TAU; g.fillStyle = rgba(lite(c, 0.55), 0.9); g.beginPath(); g.arc(Math.cos(a) * r * 0.45, Math.sin(a) * r * 0.45, r * 0.17, 0, TAU); g.fill(); }
+    hot(g, 0, 0, r * 0.24, white);
+  };
+}
+
+/* ---------- hooks called from the core game ---------- */
+function recalc40(P, pl, R, maxHp) {
+  P.focus = 0.12 * pl('focus'); P.echo = 0.07 * pl('echo'); P.barrier = pl('barrier');
+  return maxHp;
+}
+function update40(dt) {
+  const P = G.P;
+  if (P.barrier && P.alive) { // «Барьер»: one free hit, back after a while
+    if (G.shield > 0) G.barT = BARRIER_CD[P.barrier];
+    else { G.barT = (G.barT === undefined ? 2 : G.barT) - dt; if (G.barT <= 0) { G.shield = 1; G.barT = BARRIER_CD[P.barrier]; P.shieldT = 0.3; burst(P.x, P.y, 8, CI_ICE, 150, 0.35, 2.6, 1); SFX.play('equip'); } }
+  }
+}
+function onDeath40(e) {
+  if (e.plague > G.t) { const P = G.P; spawnCloud(e.x, e.y, 46 * P.area, WEAPONS.toxin.evo.dps * P.might * 0.6, 2.4, 0.3, 0, true); }
+}
+
 /* ================= main loop ================= */
 let lastNow = 0;
 const PERF = { acc: 0, n: 0, minDt: 1, cool: 3, good: 0, noUp: false, rate: 1 / 60, raw: 0 };
@@ -10482,6 +11128,7 @@ function update(dt, last) {
   }
   gridBuild();
   if (P.alive) updateWeapons(dt);
+  update40(dt);
   updateShots(dt);
   processDeaths();
   if (!G.over && !G.winPending) director(dt);
@@ -10547,6 +11194,7 @@ function boot() {
   MYMUS.load();
   SPOT.init();
   EXTM.start();
+  HD.load(); HD.onReady(() => { SFX.applyVol(); FRZ.dirty = true; });
   if (APP && window.IskraApp.ok) try { window.IskraApp.ok(); } catch (e) { /* older app */ }
 }
 window.__iskra = {
