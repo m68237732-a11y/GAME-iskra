@@ -1959,12 +1959,12 @@ const HD = (() => {
   return {
     load, bg, base,
     get ready() { return st === 2; }, get man() { return man; },
+    get gain() { return (man && man.gain) || 1; }, // the pack is levelled to one loudness; this lines it up with the synthesizer
     onReady(f) { if (st === 2 || st === -1) f(); else waiters.push(f); },
-    info() { return st === 2 ? { music: Object.keys(man.music || {}).length, bg: Object.keys(man.bg || {}).length, mb: man.mb || 0 } : null; },
+    info() { return st === 2 ? { music: Object.keys(man.music || {}).length, bg: Object.keys(man.bg || {}).length, mb: man.mb || 0, min: man.min || 0 } : null; },
   };
 })();
 /* the soundtrack: whole compositions streamed from the pack by plain <audio> (no decoding into memory, no baking) */
-const HD_GAIN = 1.0; // pack loudness against the synthesizer at the same slider position (see tools: the pack is levelled to match)
 const HDM = (() => {
   const els = [], bad = {}, FADE = 1.1;
   let cur = null, key = '', vol = 0, timer = 0, onEnd = null;
@@ -2109,7 +2109,7 @@ const SFX = (() => {
     sfxBus.gain.value = SAVE.set.sfx ? SFX_MAX * sv * sv : 0;
     musBus.gain.value = 1;
     musLvl.gain.value = SAVE.set.music ? MUS_MAX * mv * mv * musVol : 0;
-    HDM.setVol(SAVE.set.music ? Math.min(1, MUS_MAX * mv * mv * musVol * HD_GAIN) : 0);
+    HDM.setVol(SAVE.set.music ? Math.min(1, MUS_MAX * mv * mv * musVol * HD.gain) : 0);
     MYMUS.volUpdate();
   }
   // headphone-friendly space: every music voice goes to a role bus with its own reverb / ping-pong delay sends;
