@@ -9661,7 +9661,7 @@ function renderXfer() {
   box.innerHTML = '';
   const wrap = el('div', 'prof-box xfer');
   wrap.appendChild(el('p', '', APP
-    ? 'В приложении прогресс хранится на телефоне. Чтобы перенести его из версии в Claude: там Профиль → «Скопировать код», здесь — «Вставить код».'
+    ? 'В приложении прогресс хранится на телефоне. Перед тем как удалить приложение или поставить новый APK — нажми «Скопировать код» и сохрани его (например, отправь себе в чат). После установки на первом экране нажми «Уже играл? Вставить код прогресса».'
     : 'Код — это весь твой прогресс одной строкой. Им можно перенести игру в приложение для Android или на другой телефон.'));
   const row = el('div', 'my-acts');
   const cp = el('button', 'btn ghost', icon('copy') + 'СКОПИРОВАТЬ КОД');
@@ -9812,6 +9812,28 @@ function renderReg() {
   };
   go.onclick = submit;
   for (const inp of [li, pw]) if (inp) inp.addEventListener('keydown', (e) => { if (e.key === 'Enter') submit(); });
+  // 4.0: a fresh install (the app was reinstalled) can take the old progress straight from its code
+  {
+    const cb = el('button', 'reg-switch', icon('swap') + (REG.code ? 'Скрыть' : 'Уже играл? Вставить код прогресса'));
+    cb.onclick = () => { REG.code = !REG.code; SFX.play('tab'); renderReg(); };
+    box.appendChild(cb);
+    if (REG.code) {
+      const ta = el('textarea', 'inp code'); ta.rows = 4; ta.placeholder = 'Вставь сюда код (ISKRA2.…)';
+      ta.setAttribute('autocapitalize', 'off'); ta.setAttribute('spellcheck', 'false');
+      const ld = el('button', 'btn', icon('check') + 'ЗАГРУЗИТЬ ПРОГРЕСС'), msg = el('div', 'pmsg');
+      ld.onclick = async () => {
+        const r = await importCode(ta.value);
+        if (r.err) { msg.className = 'pmsg err'; msg.textContent = r.err; SFX.play('deny'); return; }
+        applyImported(r.data);
+        SAVE.seen2 = SAVE.seen21 = SAVE.seen24 = SAVE.seen25 = SAVE.seen26 = SAVE.seen40 = 1; SAVE.patchSeen = GAME_VER;
+        if (!SAVE.nick) SAVE.nick = 'Игрок';
+        REG.code = false; persist(); SFX.init(); SFX.musicStart(); SFX.play('buy');
+        toMenu();
+        UI.note('Прогресс загружен', `${(r.data.tot && r.data.tot.runs) | 0} забегов, ${fmtNum(r.data.shards | 0)} осколков`, 'check');
+      };
+      box.appendChild(ta); box.appendChild(ld); box.appendChild(msg);
+    }
+  }
   if (cloud) {
     const sw = el('button', 'reg-switch', login ? 'Нет логина? Зарегистрироваться' : 'Уже играл? Войти по логину');
     sw.onclick = () => { REG.mode = login ? 'new' : 'login'; SFX.play('tab'); renderReg(); };
